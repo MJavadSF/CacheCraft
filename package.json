@@ -1,0 +1,50 @@
+{
+  "name": "cache-craft",
+  "version": "0.1.0",
+  "description": "A lightweight, fully client-side IndexedDB cache engine with compression, encoding, LRU eviction, TTL and stale-while-revalidate support",
+  "author": "Mohammad Javad <your-email@example.com>",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc && rollup -c",
+    "prepublishOnly": "npm run build",
+    "test": "echo \"No tests yet\" && exit 0"
+  },
+  "keywords": [
+    "cache",
+    "indexeddb",
+    "client-side",
+    "offline",
+    "compression",
+    "lru",
+    "stale-while-revalidate"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MJavadSF/CacheCraft.git"
+  },
+  "bugs": {
+    "url": "https://github.com/MJavadSF/CacheCraft/issues"
+  },
+  "homepage": "https://github.com/MJavadSF/CacheCraft#readme",
+  "devDependencies": {
+    "@rollup/plugin-typescript": "^12.3.0",
+    "rollup": "^4.57.1",
+    "rollup-plugin-dts": "^6.3.0",
+    "tslib": "^2.8.1",
+    "typescript": "^5.9.3"
+  }
+}

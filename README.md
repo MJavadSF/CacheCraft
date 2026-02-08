@@ -1,242 +1,172 @@
-# CacheEngine
+# CacheCraft 🛠️
 
-> A production-grade, client-side cache engine for modern web apps  
-> Built on **IndexedDB**, with compression, encoding, LRU eviction, TTL, and stale-while-revalidate support.
+**A lightweight, fully client-side IndexedDB cache engine**  
+With support for compression (gzip), encoding (base64), LRU eviction, TTL, stale-while-revalidate, and namespaces.
 
----
+- **Framework-agnostic** → React, Vue, Svelte, Vanilla JS, etc.
+- **Persistence** → Data survives page reloads and tab closures
+- **Production-ready** → Smart eviction + size management + automatic compression
 
-## 📖 Overview
-
-`CacheEngine` is a reusable, framework-agnostic caching layer for client-side data.  
-It is designed to:
-
-- Persist data across page reloads
-- Handle large datasets efficiently
-- Reduce unnecessary network requests
-- Provide smart eviction and expiration
-- Support namespaces for logical separation of cache types
-
-It is ideal for caching:
-
-- API responses
-- Media metadata
-- Offline forms
-- Drafts
+[![npm version](https://img.shields.io/npm/v/cache-craft.svg?color=green)](https://www.npmjs.com/package/cache-craft)
+[![GitHub](https://img.shields.io/github/stars/MJavadSF/CacheCraft?style=social)](https://github.com/MJavadSF/CacheCraft)
 
 ---
 
-## ⚙ Installation
+## Key Features
 
-Copy the `cache-engine.ts` file into your project, e.g.:
+- Persistent storage with **IndexedDB**
+- **LRU eviction** (removes least recently used items when exceeding max size)
+- **gzip compression** automatic for large items (>10KB by default)
+- **Base64 encoding** optional
+- **TTL** (time to live)
+- **Stale-While-Revalidate** → Return stale data quickly + update in the background
+- **Namespaces** for logical separation of caches (e.g., user / media / offline-forms)
 
+---
+
+## Installation
+
+```bash
+npm install cache-craft
+# Or directly from GitHub (before official release):
+# npm install github:MJavadSF/CacheCraft
 ```
-/lib/cache-engine.ts
-```
 
-Then import and initialize:
+---
+
+## Quick Usage
 
 ```ts
-import { CacheEngine } from "./cache-engine";
+import { CacheEngine } from 'cache-craft';
 
-export const APPCACHE = new CacheEngine({
-  dbName: "DB",
-  version: 1,
-  storeName: "Database",
-  maxSize: 100 * 1024 * 1024, // 100 MB
-  compressionThreshold: 10 * 1024, // 10 KB
+const cache = new CacheEngine({
+  dbName: 'my-app-cache',
+  maxSize: 150 * 1024 * 1024,     // 150 MB
+  compressionThreshold: 8 * 1024, // Compress from 8 KB upwards
+  namespace: 'app-v1',            // Optional
 });
-```
 
----
-
-## 🧩 API
-
-### `set(key, value, options?)`
-
-Store a value in cache.
-
-```ts
-await APPCACHE.set("user:42", { name: "Ali", age: 30 }, {
-  ttl: 5 * 60 * 1000, // 5 minutes
-  encode: false,
-  forceCompress: false,
+// Set
+await cache.set('user-profile', { id: 42, name: 'Ali', avatar: '...' }, {
+  ttl: 10 * 60 * 1000, // 10 minutes
 });
-```
 
-- **key** — string
-- **value** — any serializable value
-- **options** — `CacheSetOptions`
-  - `ttl` — Time to live in ms
-  - `encode` — Base64 encode value
-  - `forceCompress` — Force gzip compression
+// Simple get
+const user = await cache.get<{ id: number; name: string }>('user-profile');
 
----
-
-### `get(key, options?)`
-
-Retrieve a value from cache.
-
-```ts
-const profile = await APPCACHE.get<{ name: string; age: number }>("user:42", {
+// Stale-while-revalidate (great for APIs)
+const posts = await cache.get('posts-list', {
   staleWhileRevalidate: true,
   revalidate: async () => {
-    const res = await fetch("/api/user/42");
-    return res.json();
+    const res = await fetch('/api/posts');
+    const data = await res.json();
+    await cache.set('posts-list', data, { ttl: 300_000 });
+    return data;
   },
-  ttlOnRevalidate: 5 * 60 * 1000,
 });
-```
 
-- **staleWhileRevalidate** — returns stale cache immediately and refreshes in background  
-- **revalidate** — callback to fetch fresh data  
-- **ttlOnRevalidate** — TTL for background update
-
-Returns `T | null`.
-
----
-
-### `remove(key)`
-
-Delete a cache entry:
-
-```ts
-await APPCACHE.remove("user:42");
+// Separate namespace
+const imageCache = cache.namespace('images');
+await imageCache.set('cover-001', { url: '/assets/cover.jpg', alt: '...' });
 ```
 
 ---
 
-### `clear()`
-
-Clear all cache entries:
+## Full API
 
 ```ts
-await APPCACHE.clear();
+// Create instance
+const cache = new CacheEngine(config?: CacheConfig);
+
+// Set
+await cache.set(key: string, value: any, options?: CacheSetOptions);
+
+// Get
+await cache.get<T>(key: string, options?: CacheGetOptions<T>): Promise<T | null>;
+
+// Remove single item
+await cache.remove(key: string);
+
+// Clear all cache
+await cache.clear();
+
+// Create sub-cache with namespace
+const subCache = cache.namespace('prefix');
 ```
 
----
-
-### `namespace(ns)`
-
-Create a namespaced cache instance:
+### CacheSetOptions
 
 ```ts
-const mediaCache = APPCACHE.namespace("media");
-await mediaCache.set("image:123", { url: "/img/123.jpg" });
+{
+  ttl?: number;           // milliseconds
+  encode?: boolean;       // Base64 encode?
+  forceCompress?: boolean;// Compress even if small
+}
 ```
 
-All keys are automatically prefixed with namespace:
-
-```
-media:image:123
-```
-
----
-
-## 🧪 Example Scenarios
-
-### 1. API Response Cache
+### CacheGetOptions
 
 ```ts
-async function getPosts() {
-  const cached = await APPCACHE.get("posts");
-  if (cached) return cached;
-
-  const res = await fetch("/api/posts");
-  const data = await res.json();
-
-  await APPCACHE.set("posts", data, { ttl: 5 * 60 * 1000 });
-  return data;
+{
+  staleWhileRevalidate?: boolean;
+  revalidate?: () => Promise<T>;
+  ttlOnRevalidate?: number;
 }
 ```
 
 ---
 
-### 2. Media Metadata Cache
+## Practical Examples
+
+### Cache API Response with TTL
 
 ```ts
-const mediaCache = APPCACHE.namespace("media");
+async function getUser(id: number) {
+  const key = `user:${id}`;
+  let data = await cache.get(key);
 
-await mediaCache.set("image:42", {
-  url: "/images/42.jpg",
-  description: "Beautiful sunset",
-});
+  if (!data) {
+    const res = await fetch(`/api/users/${id}`);
+    data = await res.json();
+    await cache.set(key, data, { ttl: 60_000 }); // 1 minute
+  }
+
+  return data;
+}
 ```
 
----
-
-### 3. Offline Form Persistence
+### Offline Form Draft
 
 ```ts
-await APPCACHE.set("draft:checkout", formState);
+// Save on type
+await cache.set('checkout:draft', formValues, { ttl: 24 * 60 * 60_000 });
+
+// On page load
+const saved = await cache.get('checkout:draft');
 ```
 
----
-
-### 4. Large Dataset Compression
+### Large Data with Forced Compression
 
 ```ts
-await APPCACHE.set("analytics", bigData, {
+await cache.set('analytics:2025', hugeJsonData, {
   forceCompress: true,
+  ttl: 7 * 24 * 60 * 60_000, // One week
 });
 ```
 
 ---
 
-## ⚡ Features
+## Best Practices
 
-- **IndexedDB persistence** — survives page reloads
-- **LRU eviction** — prevents exceeding storage limits
-- **Compression** — automatic gzip for large items
-- **Encoding** — optional Base64 encoding
-- **TTL expiration** — automatic expiry of cached items
-- **stale-while-revalidate** — instant stale data while fetching fresh in background
-- **Namespaces** — separate caches for different domains
+- Always use **namespaces** for different data types
+- Never cache **sensitive data** (tokens, passwords)
+- Choose **appropriate TTL** (long for static, short for APIs)
+- Use **staleWhileRevalidate** for high-traffic pages
+- Set **maxSize** based on user devices (lower for mobile)
 
 ---
 
-## ✅ Best Practices
+## Links
 
-- Always namespace different types of data (e.g., `media`, `room`, `user`)  
-- Set reasonable TTLs depending on volatility of data  
-- Use compression for large datasets (>10 KB)  
-- Use `staleWhileRevalidate` for API-heavy applications  
-
----
-
-## ❌ Anti-patterns
-
-- Caching sensitive data (passwords, tokens)  
-- Unlimited TTL for frequently changing data  
-- Using same cache instance for unrelated data  
-
----
-
-## ⚙ Debugging
-
-Clear all cache:
-
-```ts
-await APPCACHE.clear();
-```
-
----
-
-## 🔮 Future Extensions
-
-- Service Worker integration for offline-first apps  
-- Cache analytics & metrics  
-- Priority-based eviction  
-- Background sync
-
----
-
-## 📌 TL;DR
-
-`CacheEngine` provides a production-ready, reusable, and independent caching layer for client-side web applications with advanced features:
-
-- TTL + LRU eviction  
-- Compression + encoding  
-- Namespaces & revalidation  
-- Framework-independent (React, Vue, plain JS)  
-
-It is designed for **reusability**, **scalability**, and **performance** in modern web applications.
+- GitHub: [CacheCraft](https://github.com/MJavadSF/CacheCraft/)
+- npm: [cache-craft](https://www.npmjs.com/package/cache-craft)
