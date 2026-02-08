@@ -1,8 +1,8 @@
 {
-  "name": "cache-craft",
+  "name": "cache-craft-engine",
   "version": "0.1.0",
   "description": "A lightweight, fully client-side IndexedDB cache engine with compression, encoding, LRU eviction, TTL and stale-while-revalidate support",
-  "author": "Mohammad Javad <your-email@example.com>",
+  "author": "Mohammad Javad <mjavadsf72@gmail.com>",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.cjs",
