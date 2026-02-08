@@ -7,7 +7,7 @@ With support for compression (gzip), encoding (base64), LRU eviction, TTL, stale
 - **Persistence** → Data survives page reloads and tab closures
 - **Production-ready** → Smart eviction + size management + automatic compression
 
-[![npm version](https://img.shields.io/npm/v/cache-craft.svg?color=green)](https://www.npmjs.com/package/cache-craft)
+[![npm version](https://img.shields.io/npm/v/cache-craft-engine.svg?color=green)](https://www.npmjs.com/package/cache-craft-engine)
 [![GitHub](https://img.shields.io/github/stars/MJavadSF/CacheCraft?style=social)](https://github.com/MJavadSF/CacheCraft)
 
 ---
@@ -27,7 +27,7 @@ With support for compression (gzip), encoding (base64), LRU eviction, TTL, stale
 ## Installation
 
 ```bash
-npm install cache-craft
+npm install cache-craft-engine
 # Or directly from GitHub (before official release):
 # npm install github:MJavadSF/CacheCraft
 ```
@@ -37,7 +37,7 @@ npm install cache-craft
 ## Quick Usage
 
 ```ts
-import { CacheEngine } from 'cache-craft';
+import { CacheEngine } from 'cache-craft-engine';
 
 const cache = new CacheEngine({
   dbName: 'my-app-cache',
@@ -169,4 +169,4 @@ await cache.set('analytics:2025', hugeJsonData, {
 ## Links
 
 - GitHub: [CacheCraft](https://github.com/MJavadSF/CacheCraft/)
-- npm: [cache-craft](https://www.npmjs.com/package/cache-craft)
+- npm: [cache-craft-engine](https://www.npmjs.com/package/cache-craft-engine)
