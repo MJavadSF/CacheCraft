@@ -36,11 +36,11 @@ Copy the `cache-engine.ts` file into your project, e.g.:
 Then import and initialize:
 
 ```ts
-import { CacheEngine } from "@/lib/cache-engine";
+import { CacheEngine } from "./cache-engine";
 
 export const APPCACHE = new CacheEngine({
-  dbName: "yaadbood-db",
-  version: 12,
+  dbName: "DB",
+  version: 1,
   storeName: "Database",
   maxSize: 100 * 1024 * 1024, // 100 MB
   compressionThreshold: 10 * 1024, // 10 KB
