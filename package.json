@@ -1,6 +1,6 @@
 {
   "name": "cache-craft-engine",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "A lightweight, fully client-side IndexedDB cache engine with compression, encoding, LRU eviction, TTL and stale-while-revalidate support",
   "author": {
     "name": "Mohammad Javad",

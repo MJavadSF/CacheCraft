@@ -1,4 +1,4 @@
-import {CacheEntry,CacheConfig,CacheSetOptions,CacheGetOptions} from "./types"
+import {CacheConfig, CacheEntry, CacheGetOptions, CacheSetOptions} from "./types"
 // ==============================
 // Utils
 // ==============================
@@ -57,116 +57,7 @@ export class CacheEngine {
 
     // ==============================
     // DB
-    // ==============================
-    private async getDB(): Promise<IDBDatabase> {
-        if (!isClient()) throw new Error("IndexedDB unsupported");
 
-        if (!this.dbPromise) {
-            this.dbPromise = new Promise((resolve, reject) => {
-                const req = indexedDB.open(
-                    this.config.dbName,
-                    this.config.version
-                );
-
-                req.onupgradeneeded = () => {
-                    const db = req.result;
-                    if (!db.objectStoreNames.contains(this.config.storeName)) {
-                        db.createObjectStore(this.config.storeName);
-                    }
-                };
-
-                req.onsuccess = () => resolve(req.result);
-                req.onerror = () => reject(req.error);
-            });
-        }
-
-        return this.dbPromise;
-    }
-
-    private async tx<T>(
-        mode: IDBTransactionMode,
-        fn: (store: IDBObjectStore) => IDBRequest | void
-    ): Promise<T> {
-        const db = await this.getDB();
-        const tx = db.transaction(this.config.storeName, mode);
-        const store = tx.objectStore(this.config.storeName);
-
-        return new Promise((resolve, reject) => {
-            let result: any;
-
-            try {
-                const req = fn(store);
-                if (req) req.onsuccess = () => (result = req.result);
-            } catch (e) {
-                reject(e);
-            }
-
-            tx.oncomplete = () => resolve(result);
-            tx.onerror = () => reject(tx.error);
-        });
-    }
-
-    // ==============================
-    // Helpers
-    // ==============================
-    private k(key: string) {
-        return this.config.namespace
-            ? `${this.config.namespace}:${key}`
-            : key;
-    }
-
-    private async getRaw(key: string) {
-        return this.tx<CacheEntry>("readonly", s => s.get(this.k(key)));
-    }
-
-    private async putRaw(key: string, val: CacheEntry) {
-        return this.tx("readwrite", s => s.put(val, this.k(key)));
-    }
-
-    private async deleteRaw(key: string) {
-        return this.tx("readwrite", s => s.delete(this.k(key)));
-    }
-
-    // ==============================
-    // Eviction (LRU)
-    // ==============================
-    private async evict() {
-        const db = await this.getDB();
-        const tx = db.transaction(this.config.storeName, "readonly");
-        const store = tx.objectStore(this.config.storeName);
-
-        const entries: any[] = [];
-
-        await new Promise<void>(res => {
-            store.openCursor().onsuccess = (e: any) => {
-                const c = e.target.result;
-                if (!c) return res();
-
-                entries.push({
-                    key: c.key,
-                    size: c.value.size,
-                    last: c.value.lastAccessed,
-                });
-
-                c.continue();
-            };
-        });
-
-        let total = entries.reduce((s, e) => s + e.size, 0);
-
-        if (total <= this.config.maxSize) return;
-
-        entries.sort((a, b) => a.last - b.last);
-
-        for (const e of entries) {
-            if (total <= this.config.maxSize) break;
-            await this.deleteRaw(e.key);
-            total -= e.size;
-        }
-    }
-
-    // ==============================
-    // Public API
     // ==============================
     async set<T>(
         key: string,
@@ -247,6 +138,9 @@ export class CacheEngine {
             : v;
     }
 
+    // ==============================
+    // Helpers
+
     async remove(key: string) {
         await this.deleteRaw(key);
     }
@@ -260,5 +154,153 @@ export class CacheEngine {
             ...this.config,
             namespace: ns,
         });
+    }
+
+    async setBlob(key: string, blob: Blob, opt?: CacheSetOptions): Promise<void> {
+        const arrayBuffer = await blob.arrayBuffer();
+        const uint8 = new Uint8Array(arrayBuffer);
+
+        const entry: CacheEntry<Uint8Array> = {
+            value: uint8,
+            isEncoded: false,
+            isCompressed: false,
+            createdAt: Date.now(),
+            lastAccessed: Date.now(),
+            expiresAt: opt?.ttl ? Date.now() + opt.ttl : undefined,
+            size: uint8.byteLength,
+        };
+
+        await this.putRaw(key, entry);
+        await this.evict();
+    }
+
+    // ==============================
+    // Eviction (LRU)
+
+    async getBlob(key: string): Promise<Blob | null> {
+        const entry = await this.getRaw(key);
+        if (!entry) return null;
+
+        const now = Date.now();
+        if (entry.expiresAt && now > entry.expiresAt) {
+            await this.deleteRaw(key);
+            return null;
+        }
+
+        entry.lastAccessed = now;
+
+        if (entry.value instanceof Uint8Array) {
+            // @ts-ignore
+            return new Blob([entry.value.buffer], {type: 'image/jpeg'});
+        }
+
+        return null;
+    }
+
+    // ==============================
+    // Public API
+
+    // ==============================
+    private async getDB(): Promise<IDBDatabase> {
+        if (!isClient()) throw new Error("IndexedDB unsupported");
+
+        if (!this.dbPromise) {
+            this.dbPromise = new Promise((resolve, reject) => {
+                const req = indexedDB.open(
+                    this.config.dbName,
+                    this.config.version
+                );
+
+                req.onupgradeneeded = () => {
+                    const db = req.result;
+                    if (!db.objectStoreNames.contains(this.config.storeName)) {
+                        db.createObjectStore(this.config.storeName);
+                    }
+                };
+
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => reject(req.error);
+            });
+        }
+
+        return this.dbPromise;
+    }
+
+    private async tx<T>(
+        mode: IDBTransactionMode,
+        fn: (store: IDBObjectStore) => IDBRequest | void
+    ): Promise<T> {
+        const db = await this.getDB();
+        const tx = db.transaction(this.config.storeName, mode);
+        const store = tx.objectStore(this.config.storeName);
+
+        return new Promise((resolve, reject) => {
+            let result: any;
+
+            try {
+                const req = fn(store);
+                if (req) req.onsuccess = () => (result = req.result);
+            } catch (e) {
+                reject(e);
+            }
+
+            tx.oncomplete = () => resolve(result);
+            tx.onerror = () => reject(tx.error);
+        });
+    }
+
+    // ==============================
+    private k(key: string) {
+        return this.config.namespace
+            ? `${this.config.namespace}:${key}`
+            : key;
+    }
+
+    private async getRaw(key: string) {
+        return this.tx<CacheEntry>("readonly", s => s.get(this.k(key)));
+    }
+
+    private async putRaw(key: string, val: CacheEntry) {
+        return this.tx("readwrite", s => s.put(val, this.k(key)));
+    }
+
+    private async deleteRaw(key: string) {
+        return this.tx("readwrite", s => s.delete(this.k(key)));
+    }
+
+    // ==============================
+    private async evict() {
+        const db = await this.getDB();
+        const tx = db.transaction(this.config.storeName, "readonly");
+        const store = tx.objectStore(this.config.storeName);
+
+        const entries: any[] = [];
+
+        await new Promise<void>(res => {
+            store.openCursor().onsuccess = (e: any) => {
+                const c = e.target.result;
+                if (!c) return res();
+
+                entries.push({
+                    key: c.key,
+                    size: c.value.size,
+                    last: c.value.lastAccessed,
+                });
+
+                c.continue();
+            };
+        });
+
+        let total = entries.reduce((s, e) => s + e.size, 0);
+
+        if (total <= this.config.maxSize) return;
+
+        entries.sort((a, b) => a.last - b.last);
+
+        for (const e of entries) {
+            if (total <= this.config.maxSize) break;
+            await this.deleteRaw(e.key);
+            total -= e.size;
+        }
     }
 }
