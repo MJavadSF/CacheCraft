@@ -1,6 +1,6 @@
 {
   "name": "cache-craft-engine",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A lightweight, fully client-side IndexedDB cache engine with compression, encoding, LRU eviction, TTL and stale-while-revalidate support",
   "author": {
     "name": "Mohammad Javad",
@@ -27,12 +27,7 @@
   "scripts": {
     "build": "tsc && rollup -c",
     "prepublishOnly": "npm run build",
-    "test": "echo \"No tests yet\" && exit 0",
-    "lint": "eslint src --ext .ts",
-    "format": "prettier --write \"src/**/*.ts\"",
-    "typecheck": "tsc --noEmit",
-    "dev": "rollup -c -w",
-    "clean": "rm -rf dist"
+    "test": "echo \"No tests yet\" && exit 0"
   },
   "keywords": [
     "cache",
@@ -73,37 +68,6 @@
       "url": "https://github.com/abbassius"
     }
   ],
-  "engines": {
-    "node": ">=16.0.0",
-    "npm": ">=7.0.0"
-  },
-  "browserslist": [
-    ">0.2%",
-    "not dead",
-    "not op_mini all"
-  ],
-  "sideEffects": false,
-  "publishConfig": {
-    "access": "public",
-    "registry": "https://registry.npmjs.org/"
-  },
-  "badges": [
-    {
-      "description": "npm version",
-      "href": "https://www.npmjs.com/package/cache-craft-engine",
-      "url": "https://img.shields.io/npm/v/cache-craft-engine.svg"
-    },
-    {
-      "description": "downloads",
-      "href": "https://www.npmjs.com/package/cache-craft-engine",
-      "url": "https://img.shields.io/npm/dm/cache-craft-engine.svg"
-    },
-    {
-      "description": "license",
-      "href": "https://github.com/MJavadSF/CacheCraft/blob/main/LICENSE",
-      "url": "https://img.shields.io/npm/l/cache-craft-engine.svg"
-    }
-  ],
   "devDependencies": {
     "@rollup/plugin-typescript": "^12.3.0",
     "rollup": "^4.57.1",
@@ -112,4 +76,3 @@
     "typescript": "^5.9.3"
   }
 }
-
