@@ -77,16 +77,16 @@ function decode(v: string) {
 // ==============================
 export class CacheEngine {
     private dbPromise: Promise<IDBDatabase> | null = null;
-    private config: Required<CacheConfig>;
+    private readonly config: Required<CacheConfig>;
 
     constructor(cfg?: CacheConfig) {
         this.config = {
-            dbName: cfg?.dbName ?? "cache-db",
+            dbName: cfg?.dbName ?? 'cache-db',
             version: cfg?.version ?? 1,
-            storeName: cfg?.storeName ?? "cache",
+            storeName: cfg?.storeName ?? 'cache',
             maxSize: cfg?.maxSize ?? 100 * 1024 * 1024,
             compressionThreshold: cfg?.compressionThreshold ?? 10 * 1024,
-            namespace: cfg?.namespace ?? "",
+            namespace: cfg?.namespace ?? '',
         };
     }
 
@@ -94,14 +94,11 @@ export class CacheEngine {
     // DB
     // ==============================
     private async getDB(): Promise<IDBDatabase> {
-        if (!isClient()) throw new Error("IndexedDB unsupported");
+        if (!isClient()) throw new Error('IndexedDB unsupported');
 
         if (!this.dbPromise) {
             this.dbPromise = new Promise((resolve, reject) => {
-                const req = indexedDB.open(
-                    this.config.dbName,
-                    this.config.version
-                );
+                const req = indexedDB.open(this.config.dbName, this.config.version);
 
                 req.onupgradeneeded = () => {
                     const db = req.result;
@@ -123,21 +120,43 @@ export class CacheEngine {
         fn: (store: IDBObjectStore) => IDBRequest | void
     ): Promise<T> {
         const db = await this.getDB();
-        const tx = db.transaction(this.config.storeName, mode);
-        const store = tx.objectStore(this.config.storeName);
 
         return new Promise((resolve, reject) => {
+            const tx = db.transaction(this.config.storeName, mode);
+            const store = tx.objectStore(this.config.storeName);
+
             let result: any;
 
             try {
                 const req = fn(store);
-                if (req) req.onsuccess = () => (result = req.result);
-            } catch (e) {
-                reject(e);
+
+                if (req) {
+                    req.onsuccess = () => {
+                        result = req.result;
+                    };
+
+                    req.onerror = () => {
+                        console.error('❌ IndexedDB request error:', req.error);
+                        reject(req.error);
+                    };
+                }
+            } catch (err) {
+                reject(err);
             }
 
-            tx.oncomplete = () => resolve(result);
-            tx.onerror = () => reject(tx.error);
+            tx.oncomplete = () => {
+                resolve(result);
+            };
+
+            tx.onerror = () => {
+                console.error('❌ IndexedDB transaction error:', tx.error);
+                reject(tx.error);
+            };
+
+            tx.onabort = () => {
+                console.error('❌ IndexedDB aborted');
+                reject(new Error('Transaction aborted'));
+            };
         });
     }
 
@@ -145,21 +164,19 @@ export class CacheEngine {
     // Helpers
     // ==============================
     private k(key: string) {
-        return this.config.namespace
-            ? `${this.config.namespace}:${key}`
-            : key;
+        return this.config.namespace ? `${this.config.namespace}:${key}` : key;
     }
 
     private async getRaw(key: string) {
-        return this.tx<CacheEntry>("readonly", s => s.get(this.k(key)));
+        return this.tx<CacheEntry>('readonly', s => s.get(this.k(key)));
     }
 
     private async putRaw(key: string, val: CacheEntry) {
-        return this.tx("readwrite", s => s.put(val, this.k(key)));
+        return this.tx('readwrite', s => s.put(val, this.k(key)));
     }
 
     private async deleteRaw(key: string) {
-        return this.tx("readwrite", s => s.delete(this.k(key)));
+        return this.tx('readwrite', s => s.delete(this.k(key)));
     }
 
     // ==============================
@@ -167,7 +184,7 @@ export class CacheEngine {
     // ==============================
     private async evict() {
         const db = await this.getDB();
-        const tx = db.transaction(this.config.storeName, "readonly");
+        const tx = db.transaction(this.config.storeName, 'readonly');
         const store = tx.objectStore(this.config.storeName);
 
         const entries: any[] = [];
@@ -203,21 +220,14 @@ export class CacheEngine {
     // ==============================
     // Public API
     // ==============================
-    async set<T>(
-        key: string,
-        value: T,
-        opt?: CacheSetOptions
-    ) {
+    async set<T>(key: string, value: T, opt?: CacheSetOptions) {
         const json = JSON.stringify(value);
 
         let final: string | Uint8Array = json;
         let size = new Blob([json]).size;
         let compressed = false;
 
-        if (
-            opt?.forceCompress ||
-            size > this.config.compressionThreshold
-        ) {
+        if (opt?.forceCompress || size > this.config.compressionThreshold) {
             final = await compress(json);
             size = final.byteLength;
             compressed = true;
@@ -232,9 +242,7 @@ export class CacheEngine {
             isCompressed: compressed,
             createdAt: Date.now(),
             lastAccessed: Date.now(),
-            expiresAt: opt?.ttl
-                ? Date.now() + opt.ttl
-                : undefined,
+            expiresAt: opt?.ttl ? Date.now() + opt.ttl : undefined,
             size,
         };
 
@@ -242,19 +250,14 @@ export class CacheEngine {
         await this.evict();
     }
 
-    async get<T>(
-        key: string,
-        opt?: CacheGetOptions<T>
-    ): Promise<T | null> {
+    async get<T>(key: string, opt?: CacheGetOptions<T>): Promise<T | null> {
         const entry = await this.getRaw(key);
         if (!entry) return null;
 
         const now = Date.now();
-        const expired =
-            entry.expiresAt && now > entry.expiresAt;
+        const expired = entry.expiresAt && now > entry.expiresAt;
 
-        if (!expired)
-            entry.lastAccessed = now;
+        if (!expired) entry.lastAccessed = now;
 
         if (expired && opt?.staleWhileRevalidate && opt.revalidate) {
             opt.revalidate().then(v =>
@@ -271,15 +274,11 @@ export class CacheEngine {
 
         let v: any = entry.value;
 
-        if (entry.isCompressed)
-            v = await decompress(v as Uint8Array);
+        if (entry.isCompressed) v = await decompress(v as Uint8Array);
 
-        if (entry.isEncoded)
-            v = decode(v as string);
+        if (entry.isEncoded) v = decode(v as string);
 
-        return typeof v === "string"
-            ? JSON.parse(v)
-            : v;
+        return typeof v === 'string' ? JSON.parse(v) : v;
     }
 
     async remove(key: string) {
@@ -287,7 +286,7 @@ export class CacheEngine {
     }
 
     async clear() {
-        await this.tx("readwrite", s => s.clear());
+        await this.tx('readwrite', s => s.clear());
     }
 
     namespace(ns: string) {
@@ -295,5 +294,43 @@ export class CacheEngine {
             ...this.config,
             namespace: ns,
         });
+    }
+
+    async setBlob(key: string, blob: Blob, opt?: CacheSetOptions): Promise<void> {
+        const arrayBuffer = await blob.arrayBuffer();
+        const uint8 = new Uint8Array(arrayBuffer);
+
+        const entry: CacheEntry<Uint8Array> = {
+            value: uint8,
+            isEncoded: false,
+            isCompressed: false,
+            createdAt: Date.now(),
+            lastAccessed: Date.now(),
+            expiresAt: opt?.ttl ? Date.now() + opt.ttl : undefined,
+            size: uint8.byteLength,
+        };
+
+        await this.putRaw(key, entry);
+        await this.evict();
+    }
+
+    async getBlob(key: string): Promise<Blob | null> {
+        const entry = await this.getRaw(key);
+        if (!entry) return null;
+
+        const now = Date.now();
+        if (entry.expiresAt && now > entry.expiresAt) {
+            await this.deleteRaw(key);
+            return null;
+        }
+
+        entry.lastAccessed = now;
+
+        if (entry.value instanceof Uint8Array) {
+            // @ts-ignore
+            return new Blob([entry.value.buffer], { type: 'image/jpeg' });
+        }
+
+        return null;
     }
 }
