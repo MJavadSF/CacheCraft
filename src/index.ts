@@ -1,5 +1,5 @@
 // ==============================
-// CacheCraft v0.2 - Professional Edition
+// CacheCraft v2.0 - Professional Edition
 // ==============================
 
 // Core
@@ -92,6 +92,10 @@ export {
     AnalyticsPlugin,
     DebugPlugin,
 } from "./plugins";
+
+// Import for helper function
+import type { CacheConfig } from "./types";
+import { CacheEngine } from "./cache-engine";
 
 // Helper factory function
 export function createCache(config?: CacheConfig): CacheEngine {

@@ -161,12 +161,13 @@ export class CompressionOptimizerPlugin implements CachePlugin {
         this.threshold = threshold;
     }
 
-    beforeSet(key: string, value: any, options?: CacheSetOptions): CacheSetOptions {
+    beforeSet(key: string, value: any, options?: CacheSetOptions): boolean {
         const size = new Blob([JSON.stringify(value)]).size;
-        if (size > this.threshold && !options?.forceCompress) {
-            return { ...options, forceCompress: true };
+        if (size > this.threshold && !options?.forceCompress && options) {
+            // Modify options in place
+            options.forceCompress = true;
         }
-        return options || {};
+        return true;
     }
 }
 
@@ -414,10 +415,11 @@ export class DebugPlugin implements CachePlugin {
         this.verbose = verbose;
     }
 
-    beforeSet(key: string, value: any): void {
+    beforeSet(key: string, value: any, options?: CacheSetOptions): boolean {
         if (this.verbose) {
             console.debug("[CACHE DEBUG] Before Set:", { key, value });
         }
+        return true;
     }
 
     afterSet(key: string, value: any, entry: CacheEntry): void {
@@ -429,10 +431,11 @@ export class DebugPlugin implements CachePlugin {
         });
     }
 
-    beforeGet(key: string): void {
+    beforeGet(key: string, options?: CacheGetOptions<any>): boolean {
         if (this.verbose) {
             console.debug("[CACHE DEBUG] Before Get:", { key });
         }
+        return true;
     }
 
     afterGet(key: string, value: any, entry: CacheEntry | null): void {

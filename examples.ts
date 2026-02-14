@@ -6,7 +6,7 @@ import {
     ValidationPlugin,
     TagManagerPlugin,
     DebugPlugin,
-} from './src/index';
+} from './src';
 
 // ==============================
 // Example 1: Basic Usage
@@ -329,7 +329,7 @@ async function apiCachingExample() {
         await apiCache.set(cacheKey, data, {
             ttl: 5 * 60 * 1000,
             tags: ['api-response'],
-            compress: true
+            forceCompress: true
         });
         
         return data;

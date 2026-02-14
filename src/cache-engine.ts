@@ -55,7 +55,7 @@ export class CacheEngine {
     private eventListeners: Map<CacheEvent, Set<CacheEventListener>> = new Map();
     private stats: CacheStats;
     private broadcastChannel: BroadcastChannel | null = null;
-    private cleanupInterval: NodeJS.Timeout | null = null;
+    private cleanupInterval: ReturnType<typeof setInterval> | null = null;
     private instanceId: string;
     private startTime: number;
 
@@ -446,7 +446,8 @@ export class CacheEngine {
         await this.putRaw(key, entry);
 
         if (entry.value instanceof Uint8Array) {
-            return new Blob([entry.value.buffer], { type: "image/jpeg" });
+            // @ts-ignore
+            return new Blob([entry.value], { type: "image/jpeg" });
         }
 
         return null;
