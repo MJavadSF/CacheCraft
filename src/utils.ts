@@ -1,57 +1,111 @@
 // ==============================
-// Environment Check
+// CacheCraft Utils — v0.3
+// SSR-safe, cross-browser (Chrome/Firefox/Safari + mobile)
 // ==============================
 
+// ==============================
+// Environment Checks
+// ==============================
+
+/** True only in a browser context with full IndexedDB + Streams support */
 export function isClient(): boolean {
     return (
         typeof window !== "undefined" &&
-        "indexedDB" in window &&
-        "CompressionStream" in window
+        typeof indexedDB !== "undefined" &&
+        typeof CompressionStream !== "undefined"
     );
+}
+
+/** True when running in any JS environment (browser, Node, Edge runtime) */
+export function isSSR(): boolean {
+    return typeof window === "undefined";
 }
 
 export function isBroadcastChannelSupported(): boolean {
     return typeof BroadcastChannel !== "undefined";
 }
 
+export function isWebCryptoAvailable(): boolean {
+    return (
+        typeof crypto !== "undefined" &&
+        typeof crypto.subtle !== "undefined"
+    );
+}
+
+/** Detect Safari (including iOS Safari and WKWebView) */
+export function isSafari(): boolean {
+    if (typeof navigator === "undefined") return false;
+    return (
+        /^((?!chrome|android).)*safari/i.test(navigator.userAgent) ||
+        // iOS Chrome / Edge also use WebKit
+        (/iPad|iPhone|iPod/.test(navigator.userAgent) && !("MSStream" in window))
+    );
+}
+
 // ==============================
 // Compression
+// Streams API: Chrome 80+, Firefox 113+, Safari 16.4+
+// Falls back to identity (no compression) in unsupported environments
 // ==============================
 
 export async function compress(data: string): Promise<Uint8Array> {
+    if (typeof CompressionStream === "undefined") {
+        // Fallback: store as raw UTF-8 bytes without compression
+        return new TextEncoder().encode(data);
+    }
+
     const cs = new CompressionStream("gzip");
     const writer = cs.writable.getWriter();
     await writer.write(new TextEncoder().encode(data));
     await writer.close();
-    const out = await new Response(cs.readable).arrayBuffer();
-    return new Uint8Array(out);
+
+    const buffer = await new Response(cs.readable).arrayBuffer();
+    return new Uint8Array(buffer);
 }
 
 export async function decompress(data: Uint8Array): Promise<string> {
+    if (typeof DecompressionStream === "undefined") {
+        // Matching fallback: data is stored as raw UTF-8
+        return new TextDecoder().decode(data);
+    }
+
     const ds = new DecompressionStream("gzip");
     const writer = ds.writable.getWriter();
     // @ts-ignore
     await writer.write(data);
     await writer.close();
-    const out = await new Response(ds.readable).arrayBuffer();
-    return new TextDecoder().decode(out);
+
+    const buffer = await new Response(ds.readable).arrayBuffer();
+    return new TextDecoder().decode(buffer);
 }
 
 // ==============================
-// Encoding
+// Encoding (Base64 URL-safe, works in all environments)
 // ==============================
 
-export function encode(v: any): string {
-    return btoa(encodeURIComponent(JSON.stringify(v)));
+export function encode(v: unknown): string {
+    const json = JSON.stringify(v);
+    if (typeof btoa !== "undefined") {
+        return btoa(encodeURIComponent(json));
+    }
+    // Node / Edge runtime fallback
+    return Buffer.from(json, "utf8").toString("base64");
 }
 
-export function decode(v: string): any {
-    return JSON.parse(decodeURIComponent(atob(v)));
+export function decode(v: string): unknown {
+    if (typeof atob !== "undefined") {
+        return JSON.parse(decodeURIComponent(atob(v)));
+    }
+    return JSON.parse(Buffer.from(v, "base64").toString("utf8"));
 }
 
 // ==============================
-// Encryption
+// Encryption  (Web Crypto — available in all modern browsers + Node 15+)
+// Safari 15+, Chrome 37+, Firefox 34+
 // ==============================
+
+const SALT = "cachecraft-salt-v3";
+const PBKDF2_ITERATIONS = 100_000;
 
 export class EncryptionManager {
     private key: CryptoKey | null = null;
@@ -59,6 +113,10 @@ export class EncryptionManager {
 
     async initialize(password: string): Promise<void> {
         if (this.initialized) return;
+
+        if (!isWebCryptoAvailable()) {
+            throw new EncryptionError("Web Crypto API not available in this environment");
+        }
 
         const enc = new TextEncoder();
         const keyMaterial = await crypto.subtle.importKey(
@@ -72,13 +130,13 @@ export class EncryptionManager {
         this.key = await crypto.subtle.deriveKey(
             {
                 name: "PBKDF2",
-                salt: enc.encode("cachecraft-salt-v2"),
-                iterations: 100000,
+                salt: enc.encode(SALT),
+                iterations: PBKDF2_ITERATIONS,
                 hash: "SHA-256",
             },
             keyMaterial,
             { name: "AES-GCM", length: 256 },
-            true,
+            false, // non-extractable
             ["encrypt", "decrypt"]
         );
 
@@ -86,7 +144,7 @@ export class EncryptionManager {
     }
 
     async encrypt(data: string): Promise<Uint8Array> {
-        if (!this.key) throw new Error("Encryption key not initialized");
+        if (!this.key) throw new EncryptionError("Encryption key not initialized");
 
         const iv = crypto.getRandomValues(new Uint8Array(12));
         const encoded = new TextEncoder().encode(data);
@@ -97,15 +155,15 @@ export class EncryptionManager {
             encoded
         );
 
+        // Prepend IV to ciphertext
         const result = new Uint8Array(iv.length + encrypted.byteLength);
         result.set(iv, 0);
         result.set(new Uint8Array(encrypted), iv.length);
-
         return result;
     }
 
     async decrypt(data: Uint8Array): Promise<string> {
-        if (!this.key) throw new Error("Encryption key not initialized");
+        if (!this.key) throw new EncryptionError("Encryption key not initialized");
 
         const iv = data.slice(0, 12);
         const encrypted = data.slice(12);
@@ -128,17 +186,18 @@ export class EncryptionManager {
 // Size Calculation
 // ==============================
 
-export function getSize(data: any): number {
-    if (data instanceof Uint8Array) {
-        return data.byteLength;
-    }
-    if (data instanceof ArrayBuffer) {
-        return data.byteLength;
-    }
+export function getSize(data: unknown): number {
+    if (data instanceof Uint8Array) return data.byteLength;
+    if (data instanceof ArrayBuffer) return data.byteLength;
     if (typeof data === "string") {
+        // TextEncoder is available in all modern environments
+        if (typeof TextEncoder !== "undefined") {
+            return new TextEncoder().encode(data).byteLength;
+        }
+        // Fallback: approximate byte count (UTF-16 surrogate pairs are 4 bytes)
         return new Blob([data]).size;
     }
-    return new Blob([JSON.stringify(data)]).size;
+    return getSize(JSON.stringify(data));
 }
 
 // ==============================
@@ -156,9 +215,7 @@ export function parseKey(fullKey: string, namespace: string): string {
 }
 
 export function matchesPattern(key: string, pattern: RegExp | string): boolean {
-    if (pattern instanceof RegExp) {
-        return pattern.test(key);
-    }
+    if (pattern instanceof RegExp) return pattern.test(key);
     return key.includes(pattern);
 }
 
@@ -172,8 +229,7 @@ export function isExpired(expiresAt: number | undefined): boolean {
 }
 
 export function calculateTTL(ttl: number | undefined): number | undefined {
-    if (!ttl) return undefined;
-    return Date.now() + ttl;
+    return ttl !== undefined ? Date.now() + ttl : undefined;
 }
 
 export function getAge(createdAt: number): number {
@@ -193,16 +249,19 @@ export function getTimeUntilExpiry(expiresAt: number | undefined): number | null
 export function formatBytes(bytes: number): string {
     if (bytes === 0) return "0 B";
     const k = 1024;
-    const sizes = ["B", "KB", "MB", "GB"];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    const sizes = ["B", "KB", "MB", "GB"] as const;
+    const i = Math.min(
+        Math.floor(Math.log(bytes) / Math.log(k)),
+        sizes.length - 1
+    );
     return `${(bytes / Math.pow(k, i)).toFixed(2)} ${sizes[i]}`;
 }
 
 export function formatDuration(ms: number): string {
     if (ms < 1000) return `${ms}ms`;
-    if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
-    if (ms < 3600000) return `${(ms / 60000).toFixed(1)}m`;
-    return `${(ms / 3600000).toFixed(1)}h`;
+    if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+    if (ms < 3_600_000) return `${(ms / 60_000).toFixed(1)}m`;
+    return `${(ms / 3_600_000).toFixed(1)}h`;
 }
 
 export function formatPercentage(value: number): string {
@@ -210,17 +269,19 @@ export function formatPercentage(value: number): string {
 }
 
 // ==============================
-// Error Handling
+// Error Classes
 // ==============================
 
 export class CacheError extends Error {
     constructor(
         message: string,
-        public code: string,
-        public originalError?: Error
+        public readonly code: string,
+        public readonly originalError?: Error
     ) {
         super(message);
         this.name = "CacheError";
+        // Maintain proper prototype chain in transpiled ES5
+        Object.setPrototypeOf(this, new.target.prototype);
     }
 }
 
@@ -228,6 +289,7 @@ export class QuotaExceededError extends CacheError {
     constructor(message = "Storage quota exceeded") {
         super(message, "QUOTA_EXCEEDED");
         this.name = "QuotaExceededError";
+        Object.setPrototypeOf(this, new.target.prototype);
     }
 }
 
@@ -235,26 +297,42 @@ export class EncryptionError extends CacheError {
     constructor(message: string, originalError?: Error) {
         super(message, "ENCRYPTION_ERROR", originalError);
         this.name = "EncryptionError";
+        Object.setPrototypeOf(this, new.target.prototype);
+    }
+}
+
+export class UnsupportedEnvironmentError extends CacheError {
+    constructor(message = "Operation not supported in this environment") {
+        super(message, "UNSUPPORTED_ENV");
+        this.name = "UnsupportedEnvironmentError";
+        Object.setPrototypeOf(this, new.target.prototype);
     }
 }
 
 // ==============================
 // Performance Monitoring
+// Uses performance.now() when available, falls back to Date.now()
 // ==============================
 
 export class PerformanceTimer {
     private startTime: number;
 
     constructor() {
-        this.startTime = performance.now();
+        this.startTime = this.now();
+    }
+
+    private now(): number {
+        return typeof performance !== "undefined"
+            ? performance.now()
+            : Date.now();
     }
 
     elapsed(): number {
-        return performance.now() - this.startTime;
+        return this.now() - this.startTime;
     }
 
     reset(): void {
-        this.startTime = performance.now();
+        this.startTime = this.now();
     }
 }
 
@@ -262,45 +340,60 @@ export class PerformanceTimer {
 // Debounce & Throttle
 // ==============================
 
-export function debounce<T extends (...args: any[]) => any>(
+export function debounce<T extends (...args: unknown[]) => unknown>(
     func: T,
     wait: number
 ): (...args: Parameters<T>) => void {
-    let timeout: NodeJS.Timeout | null = null;
-
+    let timeout: ReturnType<typeof setTimeout> | null = null;
     return function (...args: Parameters<T>) {
-        if (timeout) clearTimeout(timeout);
-        timeout = setTimeout(() => func(...args), wait);
+        if (timeout !== null) clearTimeout(timeout);
+        timeout = setTimeout(() => {
+            timeout = null;
+            func(...args);
+        }, wait);
     };
 }
 
-export function throttle<T extends (...args: any[]) => any>(
+export function throttle<T extends (...args: unknown[]) => unknown>(
     func: T,
     limit: number
 ): (...args: Parameters<T>) => void {
-    let inThrottle: boolean;
-
+    let inThrottle = false;
     return function (...args: Parameters<T>) {
         if (!inThrottle) {
             func(...args);
             inThrottle = true;
-            setTimeout(() => (inThrottle = false), limit);
+            setTimeout(() => {
+                inThrottle = false;
+            }, limit);
         }
     };
 }
 
 // ==============================
 // Deep Clone
+// Uses structuredClone when available (Chrome 98+, Firefox 94+, Safari 15.4+, Node 17+)
+// Falls back to JSON round-trip
 // ==============================
 
 export function deepClone<T>(obj: T): T {
-    return JSON.parse(JSON.stringify(obj));
+    if (typeof structuredClone !== "undefined") {
+        return structuredClone(obj);
+    }
+    return JSON.parse(JSON.stringify(obj)) as T;
 }
 
 // ==============================
-// UUID Generator
+// UUID / ID Generation
+// Uses crypto.randomUUID() when available; falls back to Date + Math.random
 // ==============================
 
 export function generateId(): string {
-    return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    if (
+        typeof crypto !== "undefined" &&
+        typeof (crypto as Crypto & { randomUUID?: () => string }).randomUUID === "function"
+    ) {
+        return (crypto as Crypto & { randomUUID: () => string }).randomUUID();
+    }
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 11)}`;
 }

@@ -305,6 +305,7 @@ export class WarmupPlugin implements CachePlugin {
     private warmupData: Map<string, { value: any; options?: CacheSetOptions }> = new Map();
 
     addWarmupData(key: string, value: any, options?: CacheSetOptions): void {
+        // @ts-ignore
         this.warmupData.set(key, { value, options });
     }
 
@@ -380,6 +381,7 @@ export class AnalyticsPlugin implements CachePlugin {
     private onEvent?: (event: string, data: any) => void;
 
     constructor(onEvent?: (event: string, data: any) => void) {
+        // @ts-ignore
         this.onEvent = onEvent;
     }
 

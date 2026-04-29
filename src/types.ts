@@ -1,8 +1,17 @@
 // ==============================
-// BACKWARD COMPATIBLE - Original Types
+// CacheCraft Types — v0.3
+// Browser + SSR + Next.js + React compatible
 // ==============================
 
-export type CacheEntry<T = any> = {
+/** Branded type for cache keys — prevents raw string misuse */
+export type CacheKey = string & { readonly __brand: "CacheKey" };
+
+/** Helper to create a CacheKey */
+export function toCacheKey(key: string): CacheKey {
+    return key as CacheKey;
+}
+
+export type CacheEntry<T = unknown> = {
     value: T | string | Uint8Array;
     isEncoded: boolean;
     isCompressed: boolean;
@@ -10,32 +19,42 @@ export type CacheEntry<T = any> = {
     lastAccessed: number;
     expiresAt?: number;
     size: number;
-    // NEW: Optional fields (won't break existing data)
     isEncrypted?: boolean;
     accessCount?: number;
-    tags?: string[];
-    metadata?: Record<string, any>;
+    tags?: readonly string[];
+    metadata?: Readonly<Record<string, unknown>>;
     priority?: number;
 };
 
 export type CacheSetOptions = {
+    /** Time-to-live in milliseconds */
     ttl?: number;
+    /** Base64-encode the value */
     encode?: boolean;
+    /** Force gzip compression regardless of size threshold */
     forceCompress?: boolean;
-    // NEW: Additional options
+    /** Encrypt the value using AES-GCM (requires encryptionKey in config) */
     encrypt?: boolean;
-    tags?: string[];
-    metadata?: Record<string, any>;
+    /** Tags for grouping and querying entries */
+    tags?: readonly string[];
+    /** Arbitrary metadata stored alongside the entry */
+    metadata?: Readonly<Record<string, unknown>>;
+    /** Priority for eviction (higher = kept longer) */
     priority?: number;
-    onSet?: (key: string, value: any) => void;
+    /** Called after the value is persisted */
+    onSet?: (key: string, value: unknown) => void;
 };
 
 export type CacheGetOptions<T> = {
+    /** Serve stale data while revalidating in background */
     staleWhileRevalidate?: boolean;
+    /** Async function to fetch fresh data during revalidation */
     revalidate?: () => Promise<T>;
+    /** TTL applied to the revalidated value */
     ttlOnRevalidate?: number;
-    // NEW: Additional options
+    /** Update lastAccessed timestamp on read (default: true) */
     updateAccessTime?: boolean;
+    /** Called after the value is retrieved */
     onGet?: (key: string, value: T | null) => void;
 };
 
@@ -43,17 +62,23 @@ export type CacheConfig = {
     dbName?: string;
     version?: number;
     storeName?: string;
+    /** Maximum total size in bytes (default: 100 MB) */
     maxSize?: number;
+    /** Compress values larger than this (bytes, default: 10 KB) */
     compressionThreshold?: number;
+    /** Key namespace prefix */
     namespace?: string;
-    // NEW: Advanced configuration
     evictionStrategy?: EvictionStrategy;
     enableStats?: boolean;
+    /** Sync cache operations across browser tabs via BroadcastChannel */
     enableSync?: boolean;
+    /** AES-GCM encryption passphrase */
     encryptionKey?: string;
     plugins?: CachePlugin[];
     onError?: (error: Error) => void;
+    /** Periodically delete expired entries */
     autoCleanup?: boolean;
+    /** Auto-cleanup interval in ms (default: 60 000) */
     cleanupInterval?: number;
 };
 
@@ -61,11 +86,23 @@ export type CacheConfig = {
 // Eviction Strategies
 // ==============================
 
-export type EvictionStrategy = "lru" | "lfu" | "fifo" | "priority" | "custom";
+export type EvictionStrategy =
+    | "lru"
+    | "lfu"
+    | "fifo"
+    | "priority"
+    | "arc"
+    | "ttl"
+    | "size"
+    | "custom";
 
 export interface EvictionPolicy {
     name: string;
-    shouldEvict(entries: CacheEntryWithKey[], maxSize: number, currentSize: number): string[];
+    shouldEvict(
+        entries: CacheEntryWithKey[],
+        maxSize: number,
+        currentSize: number
+    ): string[];
 }
 
 export type CacheEntryWithKey = {
@@ -80,10 +117,27 @@ export type CacheEntryWithKey = {
 export interface CachePlugin {
     name: string;
     version?: string;
-    beforeSet?: (key: string, value: any, options?: CacheSetOptions) => Promise<boolean> | boolean;
-    afterSet?: (key: string, value: any, entry: CacheEntry, options?: CacheSetOptions) => Promise<void> | void;
-    beforeGet?: (key: string, options?: CacheGetOptions<any>) => Promise<boolean> | boolean;
-    afterGet?: (key: string, value: any, entry: CacheEntry | null, options?: CacheGetOptions<any>) => Promise<void> | void;
+    beforeSet?: (
+        key: string,
+        value: unknown,
+        options?: CacheSetOptions
+    ) => Promise<boolean> | boolean;
+    afterSet?: (
+        key: string,
+        value: unknown,
+        entry: CacheEntry,
+        options?: CacheSetOptions
+    ) => Promise<void> | void;
+    beforeGet?: (
+        key: string,
+        options?: CacheGetOptions<unknown>
+    ) => Promise<boolean> | boolean;
+    afterGet?: (
+        key: string,
+        value: unknown,
+        entry: CacheEntry | null,
+        options?: CacheGetOptions<unknown>
+    ) => Promise<void> | void;
     beforeDelete?: (key: string) => Promise<boolean> | boolean;
     afterDelete?: (key: string, existed: boolean) => Promise<void> | void;
     beforeClear?: () => Promise<boolean> | boolean;
@@ -111,9 +165,9 @@ export type CacheEvent =
 export type CacheEventData = {
     event: CacheEvent;
     key?: string;
-    value?: any;
+    value?: unknown;
     timestamp: number;
-    metadata?: Record<string, any>;
+    metadata?: Readonly<Record<string, unknown>>;
     error?: Error;
 };
 
@@ -132,7 +186,9 @@ export type CacheStats = {
     errors: number;
     totalSize: number;
     entryCount: number;
+    /** 0-1 ratio */
     hitRate: number;
+    /** 0-1 ratio */
     missRate: number;
     avgAccessTime: number;
     oldestEntry?: number;
@@ -153,8 +209,16 @@ export type DetailedStats = CacheStats & {
 // Query System
 // ==============================
 
+export type CacheSortField =
+    | "createdAt"
+    | "lastAccessed"
+    | "accessCount"
+    | "size"
+    | "priority"
+    | "expiresAt";
+
 export type CacheQuery = {
-    tags?: string[];
+    tags?: readonly string[];
     minPriority?: number;
     maxPriority?: number;
     minAge?: number;
@@ -166,11 +230,11 @@ export type CacheQuery = {
     expired?: boolean;
     limit?: number;
     offset?: number;
-    sortBy?: "createdAt" | "lastAccessed" | "accessCount" | "size" | "priority" | "expiresAt";
+    sortBy?: CacheSortField;
     sortOrder?: "asc" | "desc";
 };
 
-export type QueryResult<T = any> = {
+export type QueryResult<T = unknown> = {
     key: string;
     value: T;
     entry: CacheEntry<T>;
@@ -181,7 +245,7 @@ export type QueryResult<T = any> = {
 // Batch Operations
 // ==============================
 
-export type BatchSetItem<T = any> = {
+export type BatchSetItem<T = unknown> = {
     key: string;
     value: T;
     options?: CacheSetOptions;
@@ -189,10 +253,10 @@ export type BatchSetItem<T = any> = {
 
 export type BatchGetItem = {
     key: string;
-    options?: CacheGetOptions<any>;
+    options?: CacheGetOptions<unknown>;
 };
 
-export type BatchResult<T = any> = {
+export type BatchResult<T = unknown> = {
     key: string;
     value: T | null;
     success: boolean;
@@ -200,7 +264,7 @@ export type BatchResult<T = any> = {
 };
 
 // ==============================
-// Export/Import
+// Export / Import
 // ==============================
 
 export type ExportOptions = {
@@ -238,10 +302,12 @@ export type MigrationConfig = {
 // Sync System
 // ==============================
 
+export type SyncMessageType = "set" | "delete" | "clear" | "evict";
+
 export type SyncMessage = {
-    type: "set" | "delete" | "clear" | "evict";
+    type: SyncMessageType;
     key?: string;
-    value?: any;
+    value?: unknown;
     timestamp: number;
     source: string;
 };
@@ -253,7 +319,7 @@ export type SyncConfig = {
 };
 
 // ==============================
-// Admin Panel Data
+// Admin Panel
 // ==============================
 
 export type AdminPanelData = {
@@ -283,7 +349,7 @@ export type MetricData = {
     duration: number;
     success: boolean;
     timestamp: number;
-    metadata?: Record<string, any>;
+    metadata?: Readonly<Record<string, unknown>>;
 };
 
 // ==============================
@@ -310,4 +376,17 @@ export type HealthStatus = {
     size: number;
     entryCount: number;
     issues: string[];
+};
+
+// ==============================
+// Next.js / React Server Component helpers
+// ==============================
+
+/**
+ * Serialisable snapshot of a CacheEntry suitable for passing from
+ * Next.js Server Components / getServerSideProps to the client.
+ * Uint8Array values cannot be JSON-serialised and are excluded.
+ */
+export type SerializableCacheEntry<T = unknown> = Omit<CacheEntry<T>, "value"> & {
+    value: T extends Uint8Array ? never : T | string;
 };

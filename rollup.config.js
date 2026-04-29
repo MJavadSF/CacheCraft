@@ -1,32 +1,39 @@
-import typescript from '@rollup/plugin-typescript';
-import dts from 'rollup-plugin-dts';
+import typescript from "@rollup/plugin-typescript";
+import dts from "rollup-plugin-dts";
+
+const input = "src/index.ts";
+const tsOptions = { tsconfig: "./tsconfig.json", declaration: false };
 
 export default [
+    // ESM + CJS bundles
     {
-        input: 'src/index.ts',
+        input,
         output: [
             {
-                file: 'dist/index.js',
-                format: 'esm',
+                file: "dist/index.js",
+                format: "esm",
                 sourcemap: true,
+                // Explicit ESM entry for bundlers (Vite, webpack 5, esbuild)
+                exports: "named",
             },
             {
-                file: 'dist/index.cjs',
-                format: 'cjs',
+                file: "dist/index.cjs",
+                format: "cjs",
                 sourcemap: true,
+                exports: "named",
             },
         ],
-        plugins: [
-            typescript({
-                tsconfig: './tsconfig.json',
-                declaration: false,
-            }),
-        ],
+        plugins: [typescript(tsOptions)],
         external: [],
+        // Preserve module structure for better tree-shaking
+        treeshake: {
+            moduleSideEffects: false,
+        },
     },
+    // Type declarations
     {
-        input: 'src/index.ts',
-        output: [{ file: 'dist/index.d.ts', format: 'es' }],
+        input,
+        output: [{ file: "dist/index.d.ts", format: "es" }],
         plugins: [dts()],
     },
 ];

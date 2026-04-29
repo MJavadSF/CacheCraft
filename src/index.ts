@@ -1,5 +1,6 @@
 // ==============================
-// CacheCraft v2.0 - Professional Edition
+// CacheCraft v0.3
+// Browser-first · SSR-safe · Next.js · React · TypeScript · Vanilla JS
 // ==============================
 
 // Core
@@ -7,6 +8,7 @@ export { CacheEngine } from "./cache-engine";
 
 // Types
 export type {
+    CacheKey,
     CacheEntry,
     CacheSetOptions,
     CacheGetOptions,
@@ -18,6 +20,7 @@ export type {
     CacheStats,
     DetailedStats,
     CacheQuery,
+    CacheSortField,
     QueryResult,
     BatchSetItem,
     BatchGetItem,
@@ -29,14 +32,24 @@ export type {
     EvictionPolicy,
     CacheEntryWithKey,
     SyncMessage,
+    SyncMessageType,
     StorageInfo,
     HealthStatus,
     AdminPanelData,
+    SerializableCacheEntry,
+    MigrationConfig,
+    MonitorConfig,
+    MetricData,
 } from "./types";
+export { toCacheKey } from "./types";
 
 // Utilities
 export {
     isClient,
+    isSSR,
+    isBroadcastChannelSupported,
+    isWebCryptoAvailable,
+    isSafari,
     compress,
     decompress,
     encode,
@@ -49,12 +62,14 @@ export {
     isExpired,
     calculateTTL,
     getAge,
+    getTimeUntilExpiry,
     formatBytes,
     formatDuration,
     formatPercentage,
     CacheError,
     QuotaExceededError,
     EncryptionError,
+    UnsupportedEnvironmentError,
     PerformanceTimer,
     debounce,
     throttle,
@@ -74,7 +89,7 @@ export {
     createEvictionPolicy,
 } from "./eviction";
 
-// Admin Panel
+// Admin Panel & Monitor
 export { CacheAdminPanel, CacheMonitor } from "./admin";
 
 // Built-in Plugins
@@ -93,14 +108,44 @@ export {
     DebugPlugin,
 } from "./plugins";
 
-// Import for helper function
+// ==============================
+// Factory Helpers
+// ==============================
+
 import type { CacheConfig } from "./types";
 import { CacheEngine } from "./cache-engine";
+import { isSSR } from "./utils";
 
-// Helper factory function
+/**
+ * Create a CacheEngine instance.
+ *
+ * @example
+ * // Browser / client component
+ * const cache = createCache({ dbName: 'my-app', maxSize: 50 * 1024 * 1024 });
+ *
+ * @example
+ * // Next.js — safe to call at module level; throws only on actual usage in SSR
+ * const cache = createCache();
+ */
 export function createCache(config?: CacheConfig): CacheEngine {
     return new CacheEngine(config);
 }
 
-// Default export
+/**
+ * Create a CacheEngine only in browser contexts.
+ * Returns `null` during SSR / server-side rendering.
+ *
+ * Useful in Next.js App Router where modules are evaluated on the server.
+ *
+ * @example
+ * // app/layout.tsx (client boundary)
+ * "use client";
+ * const cache = createClientCache({ dbName: 'layout-cache' });
+ */
+export function createClientCache(config?: CacheConfig): CacheEngine | null {
+    if (isSSR()) return null;
+    return new CacheEngine(config);
+}
+
+// Default export for CJS / UMD consumers
 export default CacheEngine;

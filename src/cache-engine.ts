@@ -24,6 +24,8 @@ import {
 } from "./types";
 import {
     isClient,
+    isSSR,
+    isBroadcastChannelSupported,
     compress,
     decompress,
     encode,
@@ -36,9 +38,9 @@ import {
     isExpired,
     calculateTTL,
     getAge,
-    debounce,
     generateId,
     CacheError,
+    UnsupportedEnvironmentError,
     PerformanceTimer,
 } from "./utils";
 import { createEvictionPolicy } from "./eviction";
@@ -55,80 +57,67 @@ export class CacheEngine {
     private eventListeners: Map<CacheEvent, Set<CacheEventListener>> = new Map();
     private stats: CacheStats;
     private broadcastChannel: BroadcastChannel | null = null;
-    private cleanupInterval: ReturnType<typeof setInterval> | null = null;
-    private instanceId: string;
-    private startTime: number;
+    private cleanupIntervalId: ReturnType<typeof setInterval> | null = null;
+    private readonly instanceId: string;
+    private readonly startTime: number;
 
     constructor(cfg?: CacheConfig) {
         this.config = {
-            dbName: cfg?.dbName ?? "cache-db",
-            version: cfg?.version ?? 1,
-            storeName: cfg?.storeName ?? "cache",
-            maxSize: cfg?.maxSize ?? 100 * 1024 * 1024,
-            compressionThreshold: cfg?.compressionThreshold ?? 10 * 1024,
-            namespace: cfg?.namespace ?? "",
-            evictionStrategy: cfg?.evictionStrategy ?? "lru",
-            enableStats: cfg?.enableStats ?? true,
-            enableSync: cfg?.enableSync ?? false,
-            encryptionKey: cfg?.encryptionKey ?? "",
-            plugins: cfg?.plugins ?? [],
-            onError: cfg?.onError ?? (() => {}),
-            autoCleanup: cfg?.autoCleanup ?? true,
-            cleanupInterval: cfg?.cleanupInterval ?? 60000, // 1 minute
+            dbName:                 cfg?.dbName                 ?? "cache-db",
+            version:                cfg?.version                ?? 1,
+            storeName:              cfg?.storeName              ?? "cache",
+            maxSize:                cfg?.maxSize                ?? 100 * 1024 * 1024,
+            compressionThreshold:   cfg?.compressionThreshold   ?? 10 * 1024,
+            namespace:              cfg?.namespace              ?? "",
+            evictionStrategy:       cfg?.evictionStrategy       ?? "lru",
+            enableStats:            cfg?.enableStats            ?? true,
+            enableSync:             cfg?.enableSync             ?? false,
+            encryptionKey:          cfg?.encryptionKey          ?? "",
+            plugins:                cfg?.plugins                ?? [],
+            onError:                cfg?.onError                ?? (() => undefined),
+            autoCleanup:            cfg?.autoCleanup            ?? true,
+            cleanupInterval:        cfg?.cleanupInterval        ?? 60_000,
         };
 
         this.instanceId = generateId();
-        this.startTime = Date.now();
+        this.startTime  = Date.now();
 
-        // Initialize stats
-        this.stats = {
-            hits: 0,
-            misses: 0,
-            sets: 0,
-            deletes: 0,
-            evictions: 0,
-            errors: 0,
-            totalSize: 0,
-            entryCount: 0,
-            hitRate: 0,
-            missRate: 0,
-            avgAccessTime: 0,
-        };
+        this.stats = this.emptyStats();
 
-        // Initialize encryption if key provided
+        // Encryption
         if (this.config.encryptionKey) {
             this.encryption = new EncryptionManager();
             this.encryption.initialize(this.config.encryptionKey).catch((err) => {
-                this.handleError(new CacheError("Encryption initialization failed", "INIT_ERROR", err));
+                this.handleError(new CacheError("Encryption initialization failed", "INIT_ERROR", err as Error));
             });
         }
 
-        // Register plugins
-        if (this.config.plugins.length > 0) {
-            this.plugins = this.config.plugins;
+        // Plugins
+        this.plugins = [...this.config.plugins];
+
+        // Cross-tab sync (browser only)
+        if (this.config.enableSync && !isSSR() && isBroadcastChannelSupported()) {
+            this.broadcastChannel = new BroadcastChannel(
+                `cachecraft-${this.config.dbName}`
+            );
+            this.broadcastChannel.onmessage = (event) =>
+                this.handleSyncMessage(event.data as SyncMessage);
         }
 
-        // Initialize sync
-        if (this.config.enableSync && typeof BroadcastChannel !== "undefined") {
-            this.broadcastChannel = new BroadcastChannel(`cachecraft-${this.config.dbName}`);
-            this.broadcastChannel.onmessage = (event) => this.handleSyncMessage(event.data);
-        }
-
-        // Start auto cleanup
-        if (this.config.autoCleanup) {
+        // Auto-cleanup (browser only — no setInterval on the server)
+        if (this.config.autoCleanup && !isSSR()) {
             this.startAutoCleanup();
         }
     }
 
     // ==============================
-    // Core Methods (Backward Compatible)
+    // Core Methods
     // ==============================
 
     async set<T>(key: string, value: T, opt?: CacheSetOptions): Promise<void> {
         const timer = new PerformanceTimer();
 
         try {
-            // Run beforeSet plugins
             for (const plugin of this.plugins) {
                 if (plugin.beforeSet) {
                     const proceed = await plugin.beforeSet(key, value, opt);
@@ -140,66 +129,58 @@ export class CacheEngine {
             let final: string | Uint8Array = json;
             let size = getSize(json);
             let compressed = false;
-            let encrypted = false;
+            let encrypted  = false;
 
             // Compression
             if (opt?.forceCompress || size > this.config.compressionThreshold) {
-                final = await compress(json);
-                size = final.byteLength;
+                final      = await compress(json);
+                size       = (final as Uint8Array).byteLength;
                 compressed = true;
             } else if (opt?.encode) {
                 final = encode(value);
-                size = getSize(final);
+                size  = getSize(final);
             }
 
             // Encryption
             if (opt?.encrypt && this.encryption?.isInitialized()) {
-                const toEncrypt = typeof final === "string" ? final : JSON.stringify(final);
-                final = await this.encryption.encrypt(toEncrypt);
-                size = final.byteLength;
+                const toEncrypt =
+                    typeof final === "string" ? final : JSON.stringify(Array.from(final as Uint8Array));
+                final     = await this.encryption.encrypt(toEncrypt);
+                size      = (final as Uint8Array).byteLength;
                 encrypted = true;
             }
 
             const entry: CacheEntry = {
                 value: final,
-                isEncoded: opt?.encode ?? false,
+                isEncoded:    opt?.encode ?? false,
                 isCompressed: compressed,
-                isEncrypted: encrypted,
-                createdAt: Date.now(),
+                isEncrypted:  encrypted,
+                createdAt:    Date.now(),
                 lastAccessed: Date.now(),
-                accessCount: 0,
-                expiresAt: calculateTTL(opt?.ttl),
+                accessCount:  0,
+                expiresAt:    calculateTTL(opt?.ttl),
                 size,
-                tags: opt?.tags,
-                metadata: opt?.metadata,
-                priority: opt?.priority,
+                tags:         opt?.tags,
+                metadata:     opt?.metadata,
+                priority:     opt?.priority,
             };
 
             await this.putRaw(key, entry);
             await this.evict();
 
-            // Update stats
             if (this.config.enableStats) {
                 this.stats.sets++;
-                this.updateStats();
+                await this.updateStats();
             }
 
-            // Run afterSet plugins
             for (const plugin of this.plugins) {
-                if (plugin.afterSet) {
-                    await plugin.afterSet(key, value, entry, opt);
-                }
+                if (plugin.afterSet) await plugin.afterSet(key, value, entry, opt);
             }
 
-            // Emit event
             this.emit("set", { event: "set", key, value, timestamp: Date.now() });
 
-            // Callback
-            if (opt?.onSet) {
-                opt.onSet(key, value);
-            }
+            opt?.onSet?.(key, value);
 
-            // Broadcast sync
             if (this.config.enableSync) {
                 this.broadcast({ type: "set", key, value, timestamp: Date.now(), source: this.instanceId });
             }
@@ -213,10 +194,9 @@ export class CacheEngine {
         const timer = new PerformanceTimer();
 
         try {
-            // Run beforeGet plugins
             for (const plugin of this.plugins) {
                 if (plugin.beforeGet) {
-                    const proceed = await plugin.beforeGet(key, opt);
+                    const proceed = await plugin.beforeGet(key, opt as CacheGetOptions<unknown>);
                     if (proceed === false) return null;
                 }
             }
@@ -226,54 +206,42 @@ export class CacheEngine {
             if (!entry) {
                 if (this.config.enableStats) {
                     this.stats.misses++;
-                    this.updateStats();
+                    await this.updateStats();
                 }
                 this.emit("miss", { event: "miss", key, timestamp: Date.now() });
-
-                // Run afterGet plugins
                 for (const plugin of this.plugins) {
-                    if (plugin.afterGet) {
-                        await plugin.afterGet(key, null, null, opt);
-                    }
+                    if (plugin.afterGet) await plugin.afterGet(key, null, null, opt as CacheGetOptions<unknown>);
                 }
-
                 return null;
             }
 
-            const now = Date.now();
             const expired = isExpired(entry.expiresAt);
 
-            // Update access time and count
             if (!expired && (opt?.updateAccessTime ?? true)) {
-                entry.lastAccessed = now;
-                entry.accessCount = (entry.accessCount || 0) + 1;
+                entry.lastAccessed = Date.now();
+                entry.accessCount  = (entry.accessCount ?? 0) + 1;
                 await this.putRaw(key, entry);
             }
 
-            // Handle stale-while-revalidate
+            // Stale-while-revalidate
             if (expired && opt?.staleWhileRevalidate && opt.revalidate) {
                 opt.revalidate().then((v) =>
-                    this.set(key, v, {
-                        ttl: opt.ttlOnRevalidate,
-                    })
-                );
+                    this.set(key, v, { ttl: opt.ttlOnRevalidate })
+                ).catch((err: Error) => this.handleError(err));
             }
 
-            // Delete if expired and not using stale-while-revalidate
             if (expired && !opt?.staleWhileRevalidate) {
                 await this.deleteRaw(key);
                 this.emit("expire", { event: "expire", key, timestamp: Date.now() });
-
                 if (this.config.enableStats) {
                     this.stats.misses++;
-                    this.updateStats();
+                    await this.updateStats();
                 }
-
                 return null;
             }
 
-            // Decrypt, decompress, decode
-            let v: any = entry.value;
+            // Decrypt → decompress → decode → parse
+            let v: unknown = entry.value;
 
             if (entry.isEncrypted && this.encryption?.isInitialized()) {
                 v = await this.encryption.decrypt(v as Uint8Array);
@@ -287,30 +255,23 @@ export class CacheEngine {
                 v = decode(v as string);
             }
 
-            const result: T = typeof v === "string" ? JSON.parse(v) : v;
+            const result: T = typeof v === "string" ? (JSON.parse(v) as T) : (v as T);
 
-            // Update stats
             if (this.config.enableStats) {
                 this.stats.hits++;
-                this.stats.avgAccessTime = (this.stats.avgAccessTime + timer.elapsed()) / 2;
-                this.updateStats();
+                this.stats.avgAccessTime =
+                    (this.stats.avgAccessTime + timer.elapsed()) / 2;
+                await this.updateStats();
             }
 
-            // Emit event
             this.emit("hit", { event: "hit", key, value: result, timestamp: Date.now() });
             this.emit("get", { event: "get", key, value: result, timestamp: Date.now() });
 
-            // Run afterGet plugins
             for (const plugin of this.plugins) {
-                if (plugin.afterGet) {
-                    await plugin.afterGet(key, result, entry, opt);
-                }
+                if (plugin.afterGet) await plugin.afterGet(key, result, entry, opt as CacheGetOptions<unknown>);
             }
 
-            // Callback
-            if (opt?.onGet) {
-                opt.onGet(key, result);
-            }
+            opt?.onGet?.(key, result);
 
             return result;
         } catch (error) {
@@ -321,7 +282,6 @@ export class CacheEngine {
 
     async remove(key: string): Promise<boolean> {
         try {
-            // Run beforeDelete plugins
             for (const plugin of this.plugins) {
                 if (plugin.beforeDelete) {
                     const proceed = await plugin.beforeDelete(key);
@@ -334,19 +294,15 @@ export class CacheEngine {
 
             if (this.config.enableStats && existed) {
                 this.stats.deletes++;
-                this.updateStats();
+                await this.updateStats();
             }
 
-            // Run afterDelete plugins
             for (const plugin of this.plugins) {
-                if (plugin.afterDelete) {
-                    await plugin.afterDelete(key, existed);
-                }
+                if (plugin.afterDelete) await plugin.afterDelete(key, existed);
             }
 
             this.emit("delete", { event: "delete", key, timestamp: Date.now() });
 
-            // Broadcast sync
             if (this.config.enableSync) {
                 this.broadcast({ type: "delete", key, timestamp: Date.now(), source: this.instanceId });
             }
@@ -360,7 +316,6 @@ export class CacheEngine {
 
     async clear(): Promise<number> {
         try {
-            // Run beforeClear plugins
             for (const plugin of this.plugins) {
                 if (plugin.beforeClear) {
                     const proceed = await plugin.beforeClear();
@@ -372,23 +327,15 @@ export class CacheEngine {
             await this.tx("readwrite", (s) => s.clear());
 
             if (this.config.enableStats) {
-                this.stats = {
-                    ...this.stats,
-                    entryCount: 0,
-                    totalSize: 0,
-                };
+                this.stats = { ...this.stats, entryCount: 0, totalSize: 0 };
             }
 
-            // Run afterClear plugins
             for (const plugin of this.plugins) {
-                if (plugin.afterClear) {
-                    await plugin.afterClear(count);
-                }
+                if (plugin.afterClear) await plugin.afterClear(count);
             }
 
             this.emit("clear", { event: "clear", timestamp: Date.now(), metadata: { count } });
 
-            // Broadcast sync
             if (this.config.enableSync) {
                 this.broadcast({ type: "clear", timestamp: Date.now(), source: this.instanceId });
             }
@@ -401,53 +348,50 @@ export class CacheEngine {
     }
 
     namespace(ns: string): CacheEngine {
-        return new CacheEngine({
-            ...this.config,
-            namespace: ns,
-        });
+        return new CacheEngine({ ...this.config, namespace: ns });
     }
 
-    // Backward compatible blob methods
+    // ==============================
+    // Blob helpers
+    // ==============================
+
     async setBlob(key: string, blob: Blob, opt?: CacheSetOptions): Promise<void> {
-        const arrayBuffer = await blob.arrayBuffer();
-        const uint8 = new Uint8Array(arrayBuffer);
+        const uint8 = new Uint8Array(await blob.arrayBuffer());
 
         const entry: CacheEntry<Uint8Array> = {
-            value: uint8,
-            isEncoded: false,
+            value:        uint8,
+            isEncoded:    false,
             isCompressed: false,
-            isEncrypted: false,
-            createdAt: Date.now(),
+            isEncrypted:  false,
+            createdAt:    Date.now(),
             lastAccessed: Date.now(),
-            accessCount: 0,
-            expiresAt: calculateTTL(opt?.ttl),
-            size: uint8.byteLength,
-            tags: opt?.tags,
-            metadata: opt?.metadata,
-            priority: opt?.priority,
+            accessCount:  0,
+            expiresAt:    calculateTTL(opt?.ttl),
+            size:         uint8.byteLength,
+            tags:         opt?.tags,
+            metadata:     opt?.metadata,
+            priority:     opt?.priority,
         };
 
         await this.putRaw(key, entry);
         await this.evict();
     }
 
-    async getBlob(key: string): Promise<Blob | null> {
+    async getBlob(key: string, type = "application/octet-stream"): Promise<Blob | null> {
         const entry = await this.getRaw(key);
         if (!entry) return null;
 
-        const now = Date.now();
         if (isExpired(entry.expiresAt)) {
             await this.deleteRaw(key);
             return null;
         }
 
-        entry.lastAccessed = now;
-        entry.accessCount = (entry.accessCount || 0) + 1;
+        entry.lastAccessed = Date.now();
+        entry.accessCount  = (entry.accessCount ?? 0) + 1;
         await this.putRaw(key, entry);
 
         if (entry.value instanceof Uint8Array) {
-            // @ts-ignore
-            return new Blob([entry.value], { type: "image/jpeg" });
+            return new Blob([entry.value], { type });
         }
 
         return null;
@@ -474,88 +418,64 @@ export class CacheEngine {
 
     async count(): Promise<number> {
         const db = await this.getDB();
-        return new Promise((resolve, reject) => {
-            const tx = db.transaction(this.config.storeName, "readonly");
-            const store = tx.objectStore(this.config.storeName);
+        return new Promise<number>((resolve, reject) => {
+            const tx      = db.transaction(this.config.storeName, "readonly");
+            const store   = tx.objectStore(this.config.storeName);
             const request = store.count();
             request.onsuccess = () => resolve(request.result);
-            request.onerror = () => reject(request.error);
+            request.onerror   = () => reject(request.error);
         });
     }
 
     async keys(pattern?: RegExp | string): Promise<string[]> {
         const entries = await this.getAllEntries();
-        let keys = entries.map((e) => parseKey(e.key, this.config.namespace));
-
-        if (pattern) {
-            keys = keys.filter((k) => matchesPattern(k, pattern));
-        }
-
-        return keys;
+        let ks = entries.map((e) => parseKey(e.key, this.config.namespace));
+        if (pattern) ks = ks.filter((k) => matchesPattern(k, pattern));
+        return ks;
     }
 
     // ==============================
-    // Batch Operations
+    // Batch Operations (parallel with Promise.allSettled)
     // ==============================
 
     async batchSet<T>(items: BatchSetItem<T>[]): Promise<BatchResult<T>[]> {
-        const results: BatchResult<T>[] = [];
+        const settled = await Promise.allSettled(
+            items.map((item) => this.set(item.key, item.value, item.options))
+        );
 
-        for (const item of items) {
-            try {
-                await this.set(item.key, item.value, item.options);
-                results.push({ key: item.key, value: item.value, success: true });
-            } catch (error) {
-                results.push({
-                    key: item.key,
-                    value: null,
-                    success: false,
-                    error: error as Error,
-                });
+        return items.map((item, i) => {
+            const result = settled[i]!;
+            if (result.status === "fulfilled") {
+                return { key: item.key, value: item.value, success: true };
             }
-        }
-
-        return results;
+            return { key: item.key, value: null, success: false, error: result.reason as Error };
+        });
     }
 
     async batchGet<T>(items: BatchGetItem[]): Promise<BatchResult<T>[]> {
-        const results: BatchResult<T>[] = [];
+        const settled = await Promise.allSettled(
+            items.map((item) => this.get<T>(item.key, item.options as CacheGetOptions<T>))
+        );
 
-        for (const item of items) {
-            try {
-                const value = await this.get<T>(item.key, item.options);
-                results.push({ key: item.key, value, success: true });
-            } catch (error) {
-                results.push({
-                    key: item.key,
-                    value: null,
-                    success: false,
-                    error: error as Error,
-                });
+        return items.map((item, i) => {
+            const result = settled[i]!;
+            if (result.status === "fulfilled") {
+                return { key: item.key, value: result.value, success: true };
             }
-        }
-
-        return results;
+            return { key: item.key, value: null, success: false, error: result.reason as Error };
+        });
     }
 
     async batchDelete(keys: string[]): Promise<BatchResult<null>[]> {
-        const results: BatchResult<null>[] = [];
+        const settled = await Promise.allSettled(keys.map((k) => this.remove(k)));
 
-        for (const key of keys) {
-            try {
-                const success = await this.remove(key);
-                results.push({ key, value: null, success });
-            } catch (error) {
-                results.push({
-                    key,
-                    value: null,
-                    success: false,
-                    error: error as Error,
-                });
+        return keys.map((key, i) => {
+            const result = settled[i]!;
+            if (result.status === "fulfilled") {
+                return { key, value: null, success: result.value };
             }
-        }
-
-        return results;
+            return { key, value: null, success: false, error: result.reason as Error };
+        });
     }
 
     // ==============================
@@ -564,115 +484,65 @@ export class CacheEngine {
 
     async query<T>(query: CacheQuery): Promise<QueryResult<T>[]> {
         let entries = await this.getAllEntries();
-        const now = Date.now();
 
-        // Filter by tags
-        if (query.tags && query.tags.length > 0) {
+        if (query.tags?.length) {
             entries = entries.filter((e) => {
-                const entryTags = e.entry.tags || [];
+                const entryTags = e.entry.tags ?? [];
                 return query.tags!.some((tag) => entryTags.includes(tag));
             });
         }
 
-        // Filter by priority
-        if (query.minPriority !== undefined) {
+        if (query.minPriority !== undefined)
             entries = entries.filter((e) => (e.entry.priority ?? 0) >= query.minPriority!);
-        }
-        if (query.maxPriority !== undefined) {
+        if (query.maxPriority !== undefined)
             entries = entries.filter((e) => (e.entry.priority ?? 0) <= query.maxPriority!);
-        }
-
-        // Filter by age
-        if (query.minAge !== undefined) {
+        if (query.minAge !== undefined)
             entries = entries.filter((e) => getAge(e.entry.createdAt) >= query.minAge!);
-        }
-        if (query.maxAge !== undefined) {
+        if (query.maxAge !== undefined)
             entries = entries.filter((e) => getAge(e.entry.createdAt) <= query.maxAge!);
-        }
-
-        // Filter by size
-        if (query.minSize !== undefined) {
+        if (query.minSize !== undefined)
             entries = entries.filter((e) => e.entry.size >= query.minSize!);
-        }
-        if (query.maxSize !== undefined) {
+        if (query.maxSize !== undefined)
             entries = entries.filter((e) => e.entry.size <= query.maxSize!);
-        }
-
-        // Filter by access count
-        if (query.minAccessCount !== undefined) {
+        if (query.minAccessCount !== undefined)
             entries = entries.filter((e) => (e.entry.accessCount ?? 0) >= query.minAccessCount!);
-        }
-
-        // Filter by pattern
-        if (query.pattern) {
+        if (query.pattern)
             entries = entries.filter((e) => matchesPattern(e.key, query.pattern!));
-        }
-
-        // Filter by expired
         if (query.expired !== undefined) {
-            entries = entries.filter((e) => {
-                const expired = isExpired(e.entry.expiresAt);
-                return query.expired ? expired : !expired;
-            });
+            entries = entries.filter((e) =>
+                query.expired ? isExpired(e.entry.expiresAt) : !isExpired(e.entry.expiresAt)
+            );
         }
 
-        // Sort
         if (query.sortBy) {
+            const dir = query.sortOrder === "desc" ? -1 : 1;
             entries.sort((a, b) => {
                 let aVal: number, bVal: number;
-
                 switch (query.sortBy) {
-                    case "createdAt":
-                        aVal = a.entry.createdAt;
-                        bVal = b.entry.createdAt;
-                        break;
-                    case "lastAccessed":
-                        aVal = a.entry.lastAccessed;
-                        bVal = b.entry.lastAccessed;
-                        break;
-                    case "accessCount":
-                        aVal = a.entry.accessCount ?? 0;
-                        bVal = b.entry.accessCount ?? 0;
-                        break;
-                    case "size":
-                        aVal = a.entry.size;
-                        bVal = b.entry.size;
-                        break;
-                    case "priority":
-                        aVal = a.entry.priority ?? 0;
-                        bVal = b.entry.priority ?? 0;
-                        break;
-                    case "expiresAt":
-                        aVal = a.entry.expiresAt ?? Infinity;
-                        bVal = b.entry.expiresAt ?? Infinity;
-                        break;
-                    default:
-                        aVal = 0;
-                        bVal = 0;
+                    case "createdAt":    aVal = a.entry.createdAt;           bVal = b.entry.createdAt;           break;
+                    case "lastAccessed": aVal = a.entry.lastAccessed;        bVal = b.entry.lastAccessed;        break;
+                    case "accessCount":  aVal = a.entry.accessCount ?? 0;    bVal = b.entry.accessCount ?? 0;    break;
+                    case "size":         aVal = a.entry.size;                bVal = b.entry.size;                break;
+                    case "priority":     aVal = a.entry.priority ?? 0;       bVal = b.entry.priority ?? 0;       break;
+                    case "expiresAt":    aVal = a.entry.expiresAt ?? Infinity; bVal = b.entry.expiresAt ?? Infinity; break;
+                    default:             aVal = 0; bVal = 0;
                 }
-
-                return query.sortOrder === "desc" ? bVal - aVal : aVal - bVal;
+                return (aVal - bVal) * dir;
             });
         }
 
-        // Offset and limit
-        if (query.offset) {
-            entries = entries.slice(query.offset);
-        }
-        if (query.limit) {
-            entries = entries.slice(0, query.limit);
-        }
+        if (query.offset) entries = entries.slice(query.offset);
+        if (query.limit)  entries = entries.slice(0, query.limit);
 
-        // Fetch values
         const results: QueryResult<T>[] = [];
         for (const item of entries) {
             try {
-                const key = parseKey(item.key, this.config.namespace);
+                const key   = parseKey(item.key, this.config.namespace);
                 const value = await this.get<T>(key, { updateAccessTime: false });
                 if (value !== null) {
-                    results.push({ key, value, entry: item.entry });
+                    results.push({ key, value, entry: item.entry as CacheEntry<T> });
                 }
-            } catch (error) {
+            } catch {
                 // Skip failed entries
             }
         }
@@ -690,71 +560,39 @@ export class CacheEngine {
 
     async getDetailedStats(): Promise<DetailedStats> {
         const entries = await this.getAllEntries();
-        const now = Date.now();
 
         const entriesByTag: Record<string, number> = {};
-        const sizeByTag: Record<string, number> = {};
-        let compressedSize = 0;
+        const sizeByTag: Record<string, number>    = {};
+        let compressedSize   = 0;
         let uncompressedSize = 0;
-        let encryptedCount = 0;
-        let expiredCount = 0;
-
+        let encryptedCount   = 0;
+        let expiredCount     = 0;
         let oldestEntry: number | undefined;
         let newestEntry: number | undefined;
-        let mostAccessed: { key: string; count: number } | undefined;
-        let largestEntry: { key: string; size: number } | undefined;
+        let mostAccessed: { key: string; count: number }  | undefined;
+        let largestEntry:  { key: string; size: number }  | undefined;
 
-        for (const item of entries) {
-            const { entry } = item;
-
-            // Tags
-            if (entry.tags) {
-                for (const tag of entry.tags) {
-                    entriesByTag[tag] = (entriesByTag[tag] || 0) + 1;
-                    sizeByTag[tag] = (sizeByTag[tag] || 0) + entry.size;
-                }
+        for (const { key, entry } of entries) {
+            for (const tag of entry.tags ?? []) {
+                entriesByTag[tag] = (entriesByTag[tag] ?? 0) + 1;
+                sizeByTag[tag]    = (sizeByTag[tag]    ?? 0) + entry.size;
             }
 
-            // Compression
-            if (entry.isCompressed) {
-                compressedSize += entry.size;
-            } else {
-                uncompressedSize += entry.size;
-            }
+            if (entry.isCompressed) compressedSize   += entry.size;
+            else                    uncompressedSize += entry.size;
 
-            // Encryption
-            if (entry.isEncrypted) {
-                encryptedCount++;
-            }
+            if (entry.isEncrypted) encryptedCount++;
+            if (isExpired(entry.expiresAt)) expiredCount++;
 
-            // Expired
-            if (isExpired(entry.expiresAt)) {
-                expiredCount++;
-            }
+            if (!oldestEntry || entry.createdAt < oldestEntry) oldestEntry = entry.createdAt;
+            if (!newestEntry || entry.createdAt > newestEntry) newestEntry = entry.createdAt;
 
-            // Oldest/newest
-            if (!oldestEntry || entry.createdAt < oldestEntry) {
-                oldestEntry = entry.createdAt;
-            }
-            if (!newestEntry || entry.createdAt > newestEntry) {
-                newestEntry = entry.createdAt;
-            }
-
-            // Most accessed
             const accessCount = entry.accessCount ?? 0;
             if (!mostAccessed || accessCount > mostAccessed.count) {
-                mostAccessed = {
-                    key: parseKey(item.key, this.config.namespace),
-                    count: accessCount,
-                };
+                mostAccessed = { key: parseKey(key, this.config.namespace), count: accessCount };
             }
-
-            // Largest
             if (!largestEntry || entry.size > largestEntry.size) {
-                largestEntry = {
-                    key: parseKey(item.key, this.config.namespace),
-                    size: entry.size,
-                };
+                largestEntry = { key: parseKey(key, this.config.namespace), size: entry.size };
             }
         }
 
@@ -776,23 +614,11 @@ export class CacheEngine {
     }
 
     resetStats(): void {
-        this.stats = {
-            hits: 0,
-            misses: 0,
-            sets: 0,
-            deletes: 0,
-            evictions: 0,
-            errors: 0,
-            totalSize: 0,
-            entryCount: 0,
-            hitRate: 0,
-            missRate: 0,
-            avgAccessTime: 0,
-        };
+        this.stats = this.emptyStats();
     }
 
     // ==============================
-    // Export/Import
+    // Export / Import
     // ==============================
 
     async export(options?: ExportOptions): Promise<ExportData> {
@@ -801,50 +627,30 @@ export class CacheEngine {
 
         for (const item of entries) {
             const key = parseKey(item.key, this.config.namespace);
-            const { entry } = item;
-
-            // Skip expired if needed
-            if (!options?.includeExpired && isExpired(entry.expiresAt)) {
-                continue;
-            }
-
-            // Apply filter
-            if (options?.filter && !options.filter(key, entry)) {
-                continue;
-            }
-
-            exportEntries[key] = entry;
+            if (!options?.includeExpired && isExpired(item.entry.expiresAt)) continue;
+            if (options?.filter && !options.filter(key, item.entry)) continue;
+            exportEntries[key] = item.entry;
         }
 
         return {
-            version: "2.0.0",
+            version:   "0.3.0",
             timestamp: Date.now(),
-            entries: exportEntries,
-            stats: this.config.enableStats ? this.getStats() : undefined,
+            entries:   exportEntries,
+            stats:     this.config.enableStats ? this.getStats() : undefined,
         };
     }
 
     async import(data: ExportData, options?: ImportOptions): Promise<number> {
         let imported = 0;
-
         for (const [key, entry] of Object.entries(data.entries)) {
             try {
-                // Check if exists
-                const exists = await this.has(key);
-
-                if (exists && !options?.overwrite && !options?.merge) {
-                    continue;
-                }
-
+                if (!options?.overwrite && !options?.merge && (await this.has(key))) continue;
                 await this.putRaw(key, entry);
                 imported++;
             } catch (error) {
-                if (!options?.skipInvalid) {
-                    throw error;
-                }
+                if (!options?.skipInvalid) throw error;
             }
         }
-
         return imported;
     }
 
@@ -854,50 +660,42 @@ export class CacheEngine {
 
     async cleanup(): Promise<number> {
         const entries = await this.getAllEntries();
-        const now = Date.now();
         let cleaned = 0;
-
         for (const item of entries) {
             if (isExpired(item.entry.expiresAt)) {
                 await this.deleteRaw(parseKey(item.key, this.config.namespace));
                 cleaned++;
             }
         }
-
         return cleaned;
     }
 
     private startAutoCleanup(): void {
-        if (this.cleanupInterval) {
-            clearInterval(this.cleanupInterval);
-        }
-
-        this.cleanupInterval = setInterval(() => {
-            this.cleanup().catch((err) => this.handleError(err));
+        if (this.cleanupIntervalId) clearInterval(this.cleanupIntervalId);
+        this.cleanupIntervalId = setInterval(() => {
+            this.cleanup().catch((err: Error) => this.handleError(err));
         }, this.config.cleanupInterval);
     }
 
     stopAutoCleanup(): void {
-        if (this.cleanupInterval) {
-            clearInterval(this.cleanupInterval);
-            this.cleanupInterval = null;
+        if (this.cleanupIntervalId) {
+            clearInterval(this.cleanupIntervalId);
+            this.cleanupIntervalId = null;
         }
     }
 
     async getStorageInfo(): Promise<StorageInfo> {
-        if (!navigator.storage || !navigator.storage.estimate) {
-            return {
-                used: 0,
-                available: 0,
-                total: 0,
-                percentage: 0,
-                canGrow: false,
-            };
+        if (
+            isSSR() ||
+            typeof navigator === "undefined" ||
+            !navigator.storage?.estimate
+        ) {
+            return { used: 0, available: 0, total: 0, percentage: 0, canGrow: false };
         }
 
-        const estimate = await navigator.storage.estimate();
-        const used = estimate.usage || 0;
-        const total = estimate.quota || 0;
+        const estimate  = await navigator.storage.estimate();
+        const used      = estimate.usage  ?? 0;
+        const total     = estimate.quota  ?? 0;
         const available = total - used;
         const percentage = total > 0 ? used / total : 0;
 
@@ -906,7 +704,9 @@ export class CacheEngine {
             available,
             total,
             percentage,
-            canGrow: !navigator.storage.persist || (await navigator.storage.persisted()),
+            canGrow: navigator.storage.persist
+                ? await navigator.storage.persisted()
+                : true,
         };
     }
 
@@ -914,37 +714,32 @@ export class CacheEngine {
         const issues: string[] = [];
 
         try {
-            const storageInfo = await this.getStorageInfo();
-            const currentSize = await this.size();
-            const entryCount = await this.count();
+            const storageInfo  = await this.getStorageInfo();
+            const currentSize  = await this.size();
+            const entryCount   = await this.count();
 
-            // Check storage
-            if (storageInfo.percentage > 0.9) {
+            if (storageInfo.percentage > 0.9)
                 issues.push("Storage usage above 90%");
-            }
-
-            // Check cache size
-            if (currentSize > this.config.maxSize * 0.9) {
-                issues.push("Cache size near limit");
-            }
+            if (currentSize > this.config.maxSize * 0.9)
+                issues.push("Cache size near configured limit");
 
             return {
-                isHealthy: issues.length === 0,
-                uptime: Date.now() - this.startTime,
+                isHealthy:   issues.length === 0,
+                uptime:      Date.now() - this.startTime,
                 dbConnected: true,
-                size: currentSize,
+                size:        currentSize,
                 entryCount,
                 issues,
             };
         } catch (error) {
             return {
-                isHealthy: false,
-                uptime: Date.now() - this.startTime,
+                isHealthy:   false,
+                uptime:      Date.now() - this.startTime,
                 dbConnected: false,
-                size: 0,
-                entryCount: 0,
-                issues: ["Database connection failed"],
-                lastError: error as Error,
+                size:        0,
+                entryCount:  0,
+                issues:      ["Database connection failed"],
+                lastError:   error as Error,
             };
         }
     }
@@ -982,10 +777,7 @@ export class CacheEngine {
     }
 
     off(event: CacheEvent, listener: CacheEventListener): void {
-        const listeners = this.eventListeners.get(event);
-        if (listeners) {
-            listeners.delete(listener);
-        }
+        this.eventListeners.get(event)?.delete(listener);
     }
 
     once(event: CacheEvent, listener: CacheEventListener): void {
@@ -998,14 +790,13 @@ export class CacheEngine {
 
     private emit(event: CacheEvent, data: CacheEventData): void {
         const listeners = this.eventListeners.get(event);
-        if (listeners) {
-            listeners.forEach((listener) => {
-                try {
-                    listener(data);
-                } catch (error) {
-                    this.handleError(error as Error);
-                }
-            });
+        if (!listeners) return;
+        for (const listener of listeners) {
+            try {
+                listener(data);
+            } catch (error) {
+                this.handleError(error as Error);
+            }
         }
     }
 
@@ -1014,38 +805,30 @@ export class CacheEngine {
     // ==============================
 
     private broadcast(message: SyncMessage): void {
-        if (this.broadcastChannel) {
-            this.broadcastChannel.postMessage(message);
-        }
+        this.broadcastChannel?.postMessage(message);
     }
 
     private async handleSyncMessage(message: SyncMessage): Promise<void> {
-        // Ignore own messages
         if (message.source === this.instanceId) return;
 
         try {
             switch (message.type) {
                 case "set":
-                    // Refresh from DB
                     if (message.key) {
                         const entry = await this.getRaw(message.key);
                         if (entry) {
                             this.emit("sync", {
-                                event: "sync",
-                                key: message.key,
+                                event:     "sync",
+                                key:       message.key,
                                 timestamp: message.timestamp,
                             });
                         }
                     }
                     break;
                 case "delete":
-                    // Local delete without broadcast
-                    if (message.key) {
-                        await this.deleteRaw(message.key);
-                    }
+                    if (message.key) await this.deleteRaw(message.key);
                     break;
                 case "clear":
-                    // Local clear without broadcast
                     await this.tx("readwrite", (s) => s.clear());
                     break;
             }
@@ -1055,14 +838,19 @@ export class CacheEngine {
     }
 
     // ==============================
-    // Private Methods
+    // Private: IndexedDB Helpers
     // ==============================
 
     private async getDB(): Promise<IDBDatabase> {
-        if (!isClient()) throw new CacheError("IndexedDB unsupported", "UNSUPPORTED");
+        if (isSSR()) {
+            throw new UnsupportedEnvironmentError(
+                "IndexedDB is not available in server-side environments. " +
+                "Wrap cache usage in an isClient() check or use dynamic imports."
+            );
+        }
 
         if (!this.dbPromise) {
-            this.dbPromise = new Promise((resolve, reject) => {
+            this.dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
                 const req = indexedDB.open(this.config.dbName, this.config.version);
 
                 req.onupgradeneeded = () => {
@@ -1073,100 +861,107 @@ export class CacheEngine {
                 };
 
                 req.onsuccess = () => resolve(req.result);
-                req.onerror = () => reject(req.error);
+                req.onerror   = () => reject(req.error);
+
+                // Handle connection being force-closed (e.g. version bump in another tab)
+                req.onblocked = () => {
+                    this.handleError(
+                        new CacheError("IndexedDB upgrade blocked by another tab", "IDB_BLOCKED")
+                    );
+                };
             });
+
+            // Reset on unexpected close so the next call reopens the DB
+            this.dbPromise.then((db) => {
+                db.onclose = () => { this.dbPromise = null; };
+            }).catch(() => { this.dbPromise = null; });
         }
 
         return this.dbPromise;
     }
 
-    private async tx<T>(
+    private tx<T>(
         mode: IDBTransactionMode,
         fn: (store: IDBObjectStore) => IDBRequest | void
     ): Promise<T> {
-        const db = await this.getDB();
-        const tx = db.transaction(this.config.storeName, mode);
-        const store = tx.objectStore(this.config.storeName);
+        return this.getDB().then(
+            (db) =>
+                new Promise<T>((resolve, reject) => {
+                    const tx    = db.transaction(this.config.storeName, mode);
+                    const store = tx.objectStore(this.config.storeName);
+                    let result: T;
 
-        return new Promise((resolve, reject) => {
-            let result: any;
+                    try {
+                        const req = fn(store);
+                        if (req) {
+                            req.onsuccess = () => { result = req.result as T; };
+                        }
+                    } catch (e) {
+                        reject(e);
+                        return;
+                    }
 
-            try {
-                const req = fn(store);
-                if (req) req.onsuccess = () => (result = req.result);
-            } catch (e) {
-                reject(e);
-            }
-
-            tx.oncomplete = () => resolve(result);
-            tx.onerror = () => reject(tx.error);
-        });
+                    tx.oncomplete = () => resolve(result);
+                    tx.onerror    = () => reject(tx.error);
+                    tx.onabort    = () => reject(new CacheError("Transaction aborted", "TX_ABORTED"));
+                })
+        );
     }
 
     private k(key: string): string {
         return buildKey(this.config.namespace, key);
     }
 
-    private async getRaw(key: string): Promise<CacheEntry | undefined> {
-        return this.tx<CacheEntry>("readonly", (s) => s.get(this.k(key)));
+    private getRaw(key: string): Promise<CacheEntry | undefined> {
+        return this.tx<CacheEntry | undefined>("readonly", (s) => s.get(this.k(key)));
     }
 
-    private async putRaw(key: string, val: CacheEntry): Promise<void> {
+    private putRaw(key: string, val: CacheEntry): Promise<void> {
         return this.tx("readwrite", (s) => s.put(val, this.k(key)));
     }
 
-    private async deleteRaw(key: string): Promise<void> {
+    private deleteRaw(key: string): Promise<void> {
         return this.tx("readwrite", (s) => s.delete(this.k(key)));
     }
 
-    private async getAllEntries(): Promise<CacheEntryWithKey[]> {
-        const db = await this.getDB();
-        const tx = db.transaction(this.config.storeName, "readonly");
-        const store = tx.objectStore(this.config.storeName);
+    private getAllEntries(): Promise<CacheEntryWithKey[]> {
+        return this.getDB().then(
+            (db) =>
+                new Promise<CacheEntryWithKey[]>((resolve) => {
+                    const tx      = db.transaction(this.config.storeName, "readonly");
+                    const store   = tx.objectStore(this.config.storeName);
+                    const entries: CacheEntryWithKey[] = [];
 
-        const entries: CacheEntryWithKey[] = [];
-
-        return new Promise((resolve) => {
-            store.openCursor().onsuccess = (e: any) => {
-                const cursor = e.target.result;
-                if (!cursor) return resolve(entries);
-
-                entries.push({
-                    key: cursor.key as string,
-                    entry: cursor.value,
-                });
-
-                cursor.continue();
-            };
-        });
+                    store.openCursor().onsuccess = (e) => {
+                        const cursor = (e.target as IDBRequest<IDBCursorWithValue | null>).result;
+                        if (!cursor) return resolve(entries);
+                        entries.push({ key: cursor.key as string, entry: cursor.value as CacheEntry });
+                        cursor.continue();
+                    };
+                })
+        );
     }
 
     private async evict(): Promise<void> {
-        const entries = await this.getAllEntries();
+        const entries     = await this.getAllEntries();
         const currentSize = entries.reduce((sum, e) => sum + e.entry.size, 0);
-
         if (currentSize <= this.config.maxSize) return;
 
-        const policy = createEvictionPolicy(this.config.evictionStrategy);
+        const policy      = createEvictionPolicy(this.config.evictionStrategy);
         const keysToEvict = policy.shouldEvict(entries, this.config.maxSize, currentSize);
 
         for (const key of keysToEvict) {
             await this.deleteRaw(parseKey(key, this.config.namespace));
-
-            if (this.config.enableStats) {
-                this.stats.evictions++;
-            }
+            if (this.config.enableStats) this.stats.evictions++;
         }
 
-        // Emit eviction event
         if (keysToEvict.length > 0) {
             this.emit("evict", {
-                event: "evict",
+                event:     "evict",
                 timestamp: Date.now(),
-                metadata: { keys: keysToEvict, count: keysToEvict.length },
+                metadata:  { keys: keysToEvict, count: keysToEvict.length },
             });
 
-            // Run plugin callbacks
             for (const plugin of this.plugins) {
                 if (plugin.onEvict) {
                     const evictedEntries = entries
@@ -1177,44 +972,35 @@ export class CacheEngine {
             }
         }
 
-        this.updateStats();
+        await this.updateStats();
     }
 
     private async updateStats(): Promise<void> {
         if (!this.config.enableStats) return;
-
-        const currentSize = await this.size();
-        const entryCount = await this.count();
-
-        this.stats.totalSize = currentSize;
-        this.stats.entryCount = entryCount;
-
-        const total = this.stats.hits + this.stats.misses;
-        this.stats.hitRate = total > 0 ? this.stats.hits / total : 0;
-        this.stats.missRate = total > 0 ? this.stats.misses / total : 0;
+        this.stats.totalSize  = await this.size();
+        this.stats.entryCount = await this.count();
+        const total           = this.stats.hits + this.stats.misses;
+        this.stats.hitRate    = total > 0 ? this.stats.hits   / total : 0;
+        this.stats.missRate   = total > 0 ? this.stats.misses / total : 0;
     }
 
     private handleError(error: Error): void {
-        if (this.config.enableStats) {
-            this.stats.errors++;
-        }
+        if (this.config.enableStats) this.stats.errors++;
 
-        this.emit("error", {
-            event: "error",
-            timestamp: Date.now(),
-            error,
-        });
+        this.emit("error", { event: "error", timestamp: Date.now(), error });
+        this.config.onError(error);
 
-        if (this.config.onError) {
-            this.config.onError(error);
-        }
-
-        // Run plugin error handlers
         for (const plugin of this.plugins) {
-            if (plugin.onError) {
-                plugin.onError(error, "unknown");
-            }
+            plugin.onError?.(error, "unknown");
         }
+    }
+
+    private emptyStats(): CacheStats {
+        return {
+            hits: 0, misses: 0, sets: 0, deletes: 0,
+            evictions: 0, errors: 0, totalSize: 0, entryCount: 0,
+            hitRate: 0, missRate: 0, avgAccessTime: 0,
+        };
     }
 
     // ==============================
@@ -1223,16 +1009,12 @@ export class CacheEngine {
 
     async destroy(): Promise<void> {
         this.stopAutoCleanup();
-
-        if (this.broadcastChannel) {
-            this.broadcastChannel.close();
-        }
-
+        this.broadcastChannel?.close();
         this.eventListeners.clear();
         this.plugins = [];
 
         if (this.dbPromise) {
-            const db = await this.dbPromise;
+            const db    = await this.dbPromise;
             db.close();
             this.dbPromise = null;
         }
