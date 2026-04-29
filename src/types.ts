@@ -17,13 +17,13 @@ export type CacheEntry<T = unknown> = {
     isCompressed: boolean;
     createdAt: number;
     lastAccessed: number;
-    expiresAt?: number;
+    expiresAt?: number | undefined;
     size: number;
-    isEncrypted?: boolean;
-    accessCount?: number;
-    tags?: readonly string[];
-    metadata?: Readonly<Record<string, unknown>>;
-    priority?: number;
+    isEncrypted?: boolean | undefined;
+    accessCount?: number | undefined;
+    tags?: readonly string[] | undefined;
+    metadata?: Readonly<Record<string, unknown>> | undefined;
+    priority?: number | undefined;
 };
 
 export type CacheSetOptions = {

@@ -158,9 +158,9 @@ export class CacheEngine {
                 createdAt:    Date.now(),
                 lastAccessed: Date.now(),
                 accessCount:  0,
-                expiresAt:    calculateTTL(opt?.ttl),
+                expiresAt: (calculateTTL(opt?.ttl) ?? 0) as number,
                 size,
-                tags:         opt?.tags,
+                tags: opt?.tags ?? [],
                 metadata:     opt?.metadata,
                 priority:     opt?.priority,
             };
@@ -366,7 +366,7 @@ export class CacheEngine {
             createdAt:    Date.now(),
             lastAccessed: Date.now(),
             accessCount:  0,
-            expiresAt:    calculateTTL(opt?.ttl),
+            expiresAt:    calculateTTL(opt?.ttl) as number | undefined,
             size:         uint8.byteLength,
             tags:         opt?.tags,
             metadata:     opt?.metadata,
@@ -391,7 +391,7 @@ export class CacheEngine {
         await this.putRaw(key, entry);
 
         if (entry.value instanceof Uint8Array) {
-            return new Blob([entry.value], { type });
+            return new Blob([entry.value as BlobPart], { type });
         }
 
         return null;
@@ -632,12 +632,16 @@ export class CacheEngine {
             exportEntries[key] = item.entry;
         }
 
-        return {
-            version:   "0.3.0",
+        const data: ExportData = {
+            version: "0.3.0",
             timestamp: Date.now(),
-            entries:   exportEntries,
-            stats:     this.config.enableStats ? this.getStats() : undefined,
+            entries: exportEntries,
         };
+        if (this.config.enableStats) {
+            data.stats = this.getStats();
+        }
+
+        return data;
     }
 
     async import(data: ExportData, options?: ImportOptions): Promise<number> {
@@ -704,8 +708,8 @@ export class CacheEngine {
             available,
             total,
             percentage,
-            canGrow: navigator.storage.persist
-                ? await navigator.storage.persisted()
+            canGrow: typeof navigator.storage.persist === 'function'
+                ? await navigator.storage.persist()
                 : true,
         };
     }
