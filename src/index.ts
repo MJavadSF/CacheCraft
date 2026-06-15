@@ -1,5 +1,5 @@
 // ==============================
-// CacheCraft v0.3
+// CacheCraft v0.4
 // Browser-first · SSR-safe · Next.js · React · TypeScript · Vanilla JS
 // ==============================
 
@@ -10,8 +10,10 @@ export { CacheEngine } from "./cache-engine";
 export type {
     CacheKey,
     CacheEntry,
+    CacheEntryMeta,
     CacheSetOptions,
     CacheGetOptions,
+    GetOrSetOptions,
     CacheConfig,
     CachePlugin,
     CacheEvent,
@@ -83,7 +85,8 @@ export {
     LFUEvictionPolicy,
     FIFOEvictionPolicy,
     PriorityEvictionPolicy,
-    ARCEvictionPolicy,
+    SegmentedEvictionPolicy,
+    ARCEvictionPolicy, // deprecated alias of SegmentedEvictionPolicy
     TTLEvictionPolicy,
     SizeBasedEvictionPolicy,
     createEvictionPolicy,

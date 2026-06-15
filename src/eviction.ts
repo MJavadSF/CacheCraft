@@ -1,4 +1,26 @@
-import { EvictionPolicy, CacheEntryWithKey } from "./types";
+import { EvictionPolicy, CacheEntryMeta } from "./types";
+
+// ==============================
+// CacheCraft Eviction Policies — v0.4
+//
+// All policies operate on lightweight CacheEntryMeta (no payloads), so the
+// engine can decide what to evict without ever reading stored values.
+// ==============================
+
+/** Greedy "free the oldest/least-valuable until under budget" helper. */
+function collect(
+    sorted: CacheEntryMeta[],
+    bytesToFree: number
+): string[] {
+    const toEvict: string[] = [];
+    let remaining = bytesToFree;
+    for (const item of sorted) {
+        if (remaining <= 0) break;
+        toEvict.push(item.key);
+        remaining -= item.size;
+    }
+    return toEvict;
+}
 
 // ==============================
 // LRU (Least Recently Used)
@@ -7,28 +29,10 @@ import { EvictionPolicy, CacheEntryWithKey } from "./types";
 export class LRUEvictionPolicy implements EvictionPolicy {
     name = "lru";
 
-    shouldEvict(
-        entries: CacheEntryWithKey[],
-        maxSize: number,
-        currentSize: number
-    ): string[] {
+    shouldEvict(entries: CacheEntryMeta[], maxSize: number, currentSize: number): string[] {
         if (currentSize <= maxSize) return [];
-
-        // Sort by last accessed (oldest first)
-        const sorted = [...entries].sort(
-            (a, b) => a.entry.lastAccessed - b.entry.lastAccessed
-        );
-
-        const toEvict: string[] = [];
-        let sizeToFree = currentSize - maxSize;
-
-        for (const item of sorted) {
-            if (sizeToFree <= 0) break;
-            toEvict.push(item.key);
-            sizeToFree -= item.entry.size;
-        }
-
-        return toEvict;
+        const sorted = [...entries].sort((a, b) => a.lastAccessed - b.lastAccessed);
+        return collect(sorted, currentSize - maxSize);
     }
 }
 
@@ -39,32 +43,13 @@ export class LRUEvictionPolicy implements EvictionPolicy {
 export class LFUEvictionPolicy implements EvictionPolicy {
     name = "lfu";
 
-    shouldEvict(
-        entries: CacheEntryWithKey[],
-        maxSize: number,
-        currentSize: number
-    ): string[] {
+    shouldEvict(entries: CacheEntryMeta[], maxSize: number, currentSize: number): string[] {
         if (currentSize <= maxSize) return [];
-
-        // Sort by access count (least accessed first)
         const sorted = [...entries].sort((a, b) => {
-            const countA = a.entry.accessCount || 0;
-            const countB = b.entry.accessCount || 0;
-            if (countA !== countB) return countA - countB;
-            // If same count, use LRU as tiebreaker
-            return a.entry.lastAccessed - b.entry.lastAccessed;
+            if (a.accessCount !== b.accessCount) return a.accessCount - b.accessCount;
+            return a.lastAccessed - b.lastAccessed; // LRU tiebreaker
         });
-
-        const toEvict: string[] = [];
-        let sizeToFree = currentSize - maxSize;
-
-        for (const item of sorted) {
-            if (sizeToFree <= 0) break;
-            toEvict.push(item.key);
-            sizeToFree -= item.entry.size;
-        }
-
-        return toEvict;
+        return collect(sorted, currentSize - maxSize);
     }
 }
 
@@ -75,155 +60,91 @@ export class LFUEvictionPolicy implements EvictionPolicy {
 export class FIFOEvictionPolicy implements EvictionPolicy {
     name = "fifo";
 
-    shouldEvict(
-        entries: CacheEntryWithKey[],
-        maxSize: number,
-        currentSize: number
-    ): string[] {
+    shouldEvict(entries: CacheEntryMeta[], maxSize: number, currentSize: number): string[] {
         if (currentSize <= maxSize) return [];
-
-        // Sort by creation time (oldest first)
-        const sorted = [...entries].sort(
-            (a, b) => a.entry.createdAt - b.entry.createdAt
-        );
-
-        const toEvict: string[] = [];
-        let sizeToFree = currentSize - maxSize;
-
-        for (const item of sorted) {
-            if (sizeToFree <= 0) break;
-            toEvict.push(item.key);
-            sizeToFree -= item.entry.size;
-        }
-
-        return toEvict;
+        const sorted = [...entries].sort((a, b) => a.createdAt - b.createdAt);
+        return collect(sorted, currentSize - maxSize);
     }
 }
 
 // ==============================
-// Priority-Based Eviction
+// Priority-Based Eviction (lowest priority first, LRU tiebreaker)
 // ==============================
 
 export class PriorityEvictionPolicy implements EvictionPolicy {
     name = "priority";
 
-    shouldEvict(
-        entries: CacheEntryWithKey[],
-        maxSize: number,
-        currentSize: number
-    ): string[] {
+    shouldEvict(entries: CacheEntryMeta[], maxSize: number, currentSize: number): string[] {
         if (currentSize <= maxSize) return [];
-
-        // Sort by priority (lowest first), then by LRU
         const sorted = [...entries].sort((a, b) => {
-            const priorityA = a.entry.priority ?? 0;
-            const priorityB = b.entry.priority ?? 0;
-            if (priorityA !== priorityB) return priorityA - priorityB;
-            // If same priority, use LRU as tiebreaker
-            return a.entry.lastAccessed - b.entry.lastAccessed;
+            const pa = a.priority ?? 0;
+            const pb = b.priority ?? 0;
+            if (pa !== pb) return pa - pb;
+            return a.lastAccessed - b.lastAccessed;
         });
-
-        const toEvict: string[] = [];
-        let sizeToFree = currentSize - maxSize;
-
-        for (const item of sorted) {
-            if (sizeToFree <= 0) break;
-            toEvict.push(item.key);
-            sizeToFree -= item.entry.size;
-        }
-
-        return toEvict;
+        return collect(sorted, currentSize - maxSize);
     }
 }
 
 // ==============================
-// Adaptive Replacement Cache (ARC)
+// Segmented Eviction (frequency-segmented LRU)
+//
+// A pragmatic, stateless approximation of ARC: entries accessed more than once
+// ("hot") are protected and only evicted after single-access ("cold") entries
+// are exhausted. Within each segment, least-recently-used goes first. This
+// gives scan-resistance similar to ARC without needing ghost-list bookkeeping
+// that an IndexedDB-backed store cannot cheaply maintain.
 // ==============================
 
-export class ARCEvictionPolicy implements EvictionPolicy {
-    name = "arc";
-    private t1 = new Set<string>(); // Recently used once
-    private t2 = new Set<string>(); // Frequently used
-    private b1 = new Set<string>(); // Ghost entries for t1
-    private b2 = new Set<string>(); // Ghost entries for t2
-    private p = 0; // Target size for t1
+export class SegmentedEvictionPolicy implements EvictionPolicy {
+    name = "segmented";
 
-    shouldEvict(
-        entries: CacheEntryWithKey[],
-        maxSize: number,
-        currentSize: number
-    ): string[] {
+    shouldEvict(entries: CacheEntryMeta[], maxSize: number, currentSize: number): string[] {
         if (currentSize <= maxSize) return [];
 
-        const toEvict: string[] = [];
-        let sizeToFree = currentSize - maxSize;
+        const cold = entries.filter((e) => e.accessCount <= 1)
+            .sort((a, b) => a.lastAccessed - b.lastAccessed);
+        const hot = entries.filter((e) => e.accessCount > 1)
+            .sort((a, b) => {
+                if (a.accessCount !== b.accessCount) return a.accessCount - b.accessCount;
+                return a.lastAccessed - b.lastAccessed;
+            });
 
-        // Simplified ARC: evict from t1 first, then t2
-        const t1Entries = entries.filter((e) => {
-            const count = e.entry.accessCount || 0;
-            return count <= 1;
-        });
-
-        const t2Entries = entries.filter((e) => {
-            const count = e.entry.accessCount || 0;
-            return count > 1;
-        });
-
-        // Sort t1 by LRU, t2 by LFU
-        t1Entries.sort((a, b) => a.entry.lastAccessed - b.entry.lastAccessed);
-        t2Entries.sort((a, b) => {
-            const countA = a.entry.accessCount || 0;
-            const countB = b.entry.accessCount || 0;
-            return countA - countB;
-        });
-
-        for (const item of [...t1Entries, ...t2Entries]) {
-            if (sizeToFree <= 0) break;
-            toEvict.push(item.key);
-            sizeToFree -= item.entry.size;
-        }
-
-        return toEvict;
+        return collect([...cold, ...hot], currentSize - maxSize);
     }
 }
 
+/**
+ * @deprecated Renamed to {@link SegmentedEvictionPolicy}. The previous "ARC"
+ * implementation was never a true Adaptive Replacement Cache; this alias keeps
+ * existing configs working but the honest name is "segmented".
+ */
+export class ARCEvictionPolicy extends SegmentedEvictionPolicy {
+    override name = "segmented";
+}
+
 // ==============================
-// TTL-Based Eviction
+// TTL-Based Eviction (expired first, then nearest-to-expiry)
 // ==============================
 
 export class TTLEvictionPolicy implements EvictionPolicy {
     name = "ttl";
 
-    shouldEvict(
-        entries: CacheEntryWithKey[],
-        maxSize: number,
-        currentSize: number
-    ): string[] {
+    shouldEvict(entries: CacheEntryMeta[], maxSize: number, currentSize: number): string[] {
         if (currentSize <= maxSize) return [];
 
         const now = Date.now();
+        const expired = entries.filter((e) => e.expiresAt !== undefined && e.expiresAt < now);
 
-        // First, evict expired entries
-        const expired = entries.filter(
-            (e) => e.entry.expiresAt && e.entry.expiresAt < now
-        );
+        const toEvict = expired.map((e) => e.key);
+        const freed = expired.reduce((sum, e) => sum + e.size, 0);
 
-        let toEvict = expired.map((e) => e.key);
-        let sizeFreed = expired.reduce((sum, e) => sum + e.entry.size, 0);
-
-        // If still over limit, evict entries closest to expiration
-        if (currentSize - sizeFreed > maxSize) {
+        if (currentSize - freed > maxSize) {
+            const expiredKeys = new Set(toEvict);
             const withTTL = entries
-                .filter((e) => e.entry.expiresAt && !expired.includes(e))
-                .sort((a, b) => (a.entry.expiresAt || 0) - (b.entry.expiresAt || 0));
-
-            let sizeToFree = currentSize - sizeFreed - maxSize;
-
-            for (const item of withTTL) {
-                if (sizeToFree <= 0) break;
-                toEvict.push(item.key);
-                sizeToFree -= item.entry.size;
-            }
+                .filter((e) => e.expiresAt !== undefined && !expiredKeys.has(e.key))
+                .sort((a, b) => (a.expiresAt ?? 0) - (b.expiresAt ?? 0));
+            toEvict.push(...collect(withTTL, currentSize - freed - maxSize));
         }
 
         return toEvict;
@@ -231,32 +152,16 @@ export class TTLEvictionPolicy implements EvictionPolicy {
 }
 
 // ==============================
-// Size-Based Eviction (evict largest first)
+// Size-Based Eviction (largest first)
 // ==============================
 
 export class SizeBasedEvictionPolicy implements EvictionPolicy {
     name = "size";
 
-    shouldEvict(
-        entries: CacheEntryWithKey[],
-        maxSize: number,
-        currentSize: number
-    ): string[] {
+    shouldEvict(entries: CacheEntryMeta[], maxSize: number, currentSize: number): string[] {
         if (currentSize <= maxSize) return [];
-
-        // Sort by size (largest first)
-        const sorted = [...entries].sort((a, b) => b.entry.size - a.entry.size);
-
-        const toEvict: string[] = [];
-        let sizeToFree = currentSize - maxSize;
-
-        for (const item of sorted) {
-            if (sizeToFree <= 0) break;
-            toEvict.push(item.key);
-            sizeToFree -= item.entry.size;
-        }
-
-        return toEvict;
+        const sorted = [...entries].sort((a, b) => b.size - a.size);
+        return collect(sorted, currentSize - maxSize);
     }
 }
 
@@ -266,21 +171,14 @@ export class SizeBasedEvictionPolicy implements EvictionPolicy {
 
 export function createEvictionPolicy(strategy: string): EvictionPolicy {
     switch (strategy) {
-        case "lru":
-            return new LRUEvictionPolicy();
-        case "lfu":
-            return new LFUEvictionPolicy();
-        case "fifo":
-            return new FIFOEvictionPolicy();
-        case "priority":
-            return new PriorityEvictionPolicy();
-        case "arc":
-            return new ARCEvictionPolicy();
-        case "ttl":
-            return new TTLEvictionPolicy();
-        case "size":
-            return new SizeBasedEvictionPolicy();
-        default:
-            return new LRUEvictionPolicy();
+        case "lru":       return new LRUEvictionPolicy();
+        case "lfu":       return new LFUEvictionPolicy();
+        case "fifo":      return new FIFOEvictionPolicy();
+        case "priority":  return new PriorityEvictionPolicy();
+        case "segmented":
+        case "arc":       return new SegmentedEvictionPolicy();
+        case "ttl":       return new TTLEvictionPolicy();
+        case "size":      return new SizeBasedEvictionPolicy();
+        default:          return new LRUEvictionPolicy();
     }
 }

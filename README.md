@@ -16,19 +16,38 @@
 
 ---
 
-## 🆕 What's New in v0.3
+## 🆕 What's New in v0.4
 
-- 🌐 **SSR-Safe** — No crash on server render; `isSSR()` + `createClientCache()` helpers for Next.js App Router
-- ⚛️ **`createClientCache()`** — Returns `null` during SSR, a full `CacheEngine` in the browser
-- 🔒 **Stricter TypeScript** — `unknown` replaces `any`, `readonly` arrays, `exactOptionalPropertyTypes`, branded
-  `CacheKey`
-- 🛡️ **`UnsupportedEnvironmentError`** — Descriptive error when IndexedDB is accessed server-side
-- 🔁 **Parallel batch ops** — `batchSet/batchGet/batchDelete` now use `Promise.allSettled` for true parallelism
-- 🍎 **Safari / iOS** — Compression falls back gracefully on Safari < 16.4; `isSafari()` helper exported
-- 🌐 **`structuredClone`** — Used for deep cloning when available (Chrome 98+, Firefox 94+, Safari 15.4+)
-- 🔑 **`crypto.randomUUID()`** — Used for instance IDs when available; legacy fallback retained
-- 🔧 **`sideEffects: false`** in `package.json` — Enables full tree-shaking in Vite / webpack 5 / esbuild
-- 📦 **Named exports only** — Cleaner import experience; default export kept for CJS compatibility
+v0.4 is a major **performance and ergonomics** release. The engine now keeps an
+in-memory metadata index so the hot paths never scan IndexedDB or deserialize
+payloads.
+
+- ⚡ **In-memory metadata index** — `size()`, `count()`, `keys()`, eviction, query
+  pre-filtering and tag lookups are now O(1)/O(n-in-memory) instead of reading and
+  decoding the whole database on every write. Hydrated once on first DB open.
+- 📉 **No more read-path write amplification** — access-time / access-count updates
+  are buffered in memory and flushed on an interval (`persistAccessMetadata`,
+  `accessMetadataFlushInterval`), instead of writing back to IndexedDB on every `get`.
+- 🧲 **`getOrSet()` (cache-aside) with stampede protection** — concurrent misses on
+  the same key share a single factory call (single-flight), with optional
+  stale-while-revalidate and `fallbackToStale`.
+- 🏷️ **First-class tag invalidation** — `invalidateByTag()`, `invalidateByTags()`,
+  `keysByTag()`, `allTags()`, backed by an in-memory tag index (no full scan).
+- 🧱 **Atomic batch writes** — `batchSet()` / `batchDelete()` now run in a *single*
+  IndexedDB transaction (all-or-nothing, much faster). New `getMany()` reads many
+  keys in one transaction.
+- ⚛️ **Official React hooks** — `import { useCache, useCacheValue, useCacheStats }
+  from 'cache-craft-engine/react'`. SSR-safe, shared engine per config, SWR-style API.
+- 🛠️ **Custom eviction policies** — pass `evictionStrategy: 'custom'` +
+  `evictionPolicy`.
+- 🐛 **Bug fixes** — compression + encoding/encryption combinations now round-trip
+  correctly; `setBlob` now emits events, updates stats and broadcasts like `set`.
+- ✏️ **`arc` → `segmented`** — the old "ARC" policy was never a true Adaptive
+  Replacement Cache. It is renamed to the honest `segmented` (frequency-segmented,
+  scan-resistant LRU). `arc` and `ARCEvictionPolicy` remain as deprecated aliases.
+
+> **Backwards compatible.** Existing v0.3 code keeps working. See
+> [MIGRATION.md](./MIGRATION.md) for the small notes.
 
 ---
 
@@ -42,15 +61,19 @@ It works in React, Next.js, Vue, Svelte, Angular and plain TypeScript / JavaScri
 | Feature                  | Detail                                                                                 |
 |--------------------------|----------------------------------------------------------------------------------------|
 | 💾 Persistent            | Survives page reloads and browser restarts                                             |
+| ⚡ In-memory index       | O(1) `size`/`count`, scan-free eviction & queries — payloads read only when returned   |
+| 🧲 `getOrSet`            | Cache-aside with single-flight stampede protection + stale-while-revalidate            |
+| 🏷️ Tag invalidation     | `invalidateByTag` / `keysByTag` backed by an in-memory tag index                       |
+| 🧱 Atomic batches        | `batchSet` / `batchDelete` in a single transaction; `getMany` in one read              |
+| ⚛️ React hooks           | `useCache` / `useCacheValue` / `useCacheStats` from `cache-craft-engine/react`         |
 | 🗜️ Compression          | Streams API gzip (Chrome 80+, Firefox 113+, Safari 16.4+), fallback for older browsers |
 | 🔐 Encryption            | AES-GCM 256-bit via Web Crypto (all modern browsers + Node 15+)                        |
-| ♻️ 7 Eviction strategies | LRU, LFU, FIFO, Priority, ARC, TTL, Size                                               |
+| ♻️ 7 Eviction strategies | LRU, LFU, FIFO, Priority, Segmented, TTL, Size (+ custom)                              |
 | ⏱️ Flexible TTL          | With stale-while-revalidate support                                                    |
 | 🌐 SSR-safe              | No crash in Next.js / Nuxt / Remix server environments                                 |
-| 🔄 Tab sync              | BroadcastChannel keeps tabs consistent                                                 |
+| 🔄 Tab sync              | BroadcastChannel keeps tabs (and their in-memory indexes) consistent                   |
 | 🔌 Plugin system         | 12+ built-in plugins, easy to extend                                                   |
 | 📊 Admin panel           | Real-time stats, health checks, top-key reports                                        |
-| 📦 Batch ops             | Parallel `batchSet` / `batchGet` / `batchDelete`                                       |
 | 🏷️ Tags & Namespaces    | Logical grouping for bulk invalidation                                                 |
 | 🌳 Tree-shakeable        | `sideEffects: false` — import only what you use                                        |
 
@@ -81,6 +104,42 @@ await cache.set('user', {id: 1, name: 'Ali'}, {ttl: 60_000});
 const user = await cache.get('user');
 await cache.remove('user');
 await cache.clear();
+```
+
+### `getOrSet` — the cache-aside pattern (recommended)
+
+The most common caching pattern in one call. If the key is cached and fresh it's
+returned; otherwise the factory runs, the result is stored, and returned.
+Concurrent calls for the same key share **one** factory execution (no stampede):
+
+```typescript
+const user = await cache.getOrSet(
+    `user:${id}`,
+    () => fetch(`/api/users/${id}`).then(r => r.json()),
+    { ttl: 5 * 60_000, tags: ['users'] }
+);
+
+// Serve stale instantly, refresh in the background:
+const feed = await cache.getOrSet('feed', loadFeed, {
+    ttl: 60_000,
+    staleWhileRevalidate: true,
+    ttlOnRevalidate: 60_000,
+});
+
+// Keep serving the last good value if the factory fails:
+const config = await cache.getOrSet('config', loadConfig, { fallbackToStale: true });
+```
+
+### Tag invalidation
+
+```typescript
+await cache.set('post:1', p1, { tags: ['posts', 'home'] });
+await cache.set('post:2', p2, { tags: ['posts'] });
+
+// After a mutation, drop everything tagged 'posts' in one O(n-tagged) call:
+const removed = await cache.invalidateByTag('posts');   // → 2
+await cache.invalidateByTags(['posts', 'home']);
+const keys = await cache.keysByTag('posts');
 ```
 
 ### With Advanced Options
@@ -171,50 +230,55 @@ export async function getServerSideProps() {
 }
 ```
 
-### Custom React Hook
+### Official React hooks (`cache-craft-engine/react`)
+
+v0.4 ships first-class, SSR-safe hooks. They share one engine per `dbName`
+(so multiple components reading the same key hit the same in-memory cache).
 
 ```tsx
-// hooks/useCache.ts
 "use client";
-
-import {createClientCache, type CacheConfig} from 'cache-craft-engine';
-import {useRef} from 'react';
-
-let _cache: ReturnType<typeof createClientCache> = null;
-
-export function useCache(config?: CacheConfig) {
-    const ref = useRef(_cache);
-
-    if (!ref.current) {
-        ref.current = createClientCache(config);
-        _cache = ref.current;  // singleton per session
-    }
-
-    return ref.current;
-}
-```
-
-```tsx
-// Usage
-"use client";
-import {useCache} from '@/hooks/useCache';
+import { useCache } from 'cache-craft-engine/react';
 
 export function ProductList() {
-    const cache = useCache({dbName: 'products'});
+    const { data, error, isLoading, isValidating, refresh, invalidate, mutate } =
+        useCache(
+            'products',
+            () => fetch('/api/products').then(r => r.json()),
+            { ttl: 2 * 60_000, tags: ['products'], config: { dbName: 'shop' } }
+        );
 
-    async function loadProducts() {
-        if (!cache) return;
-        const cached = await cache.get('products');
-        if (cached) return cached;
+    if (isLoading) return <Spinner />;
+    if (error) return <Error onRetry={refresh} />;
 
-        const data = await fetch('/api/products').then(r => r.json());
-        await cache.set('products', data, {ttl: 2 * 60_000});
-        return data;
-    }
-
-    // ...
+    return (
+        <>
+            {isValidating && <RefreshingBadge />}
+            <ul>{data?.map(p => <li key={p.id}>{p.name}</li>)}</ul>
+            <button onClick={refresh}>Refresh</button>
+        </>
+    );
 }
 ```
+
+Other hooks:
+
+```tsx
+import { useCacheValue, useCacheStats, useCacheEngine } from 'cache-craft-engine/react';
+
+// Read-only subscription to a single key (updates on local + cross-tab writes)
+const token = useCacheValue<string>('auth:token', { config: { dbName: 'app' } });
+
+// Live stats snapshot via useSyncExternalStore
+const stats = useCacheStats({ config: { dbName: 'app' } });
+
+// Direct access to the shared engine for imperative calls
+const cache = useCacheEngine({ dbName: 'app' });
+```
+
+> `useCache` supports `enabled` (conditional fetching), `revalidateOnFocus`,
+> and all `getOrSet` options (`staleWhileRevalidate`, `fallbackToStale`, `ttl`,
+> `tags`, …).
+
 
 ### Next.js Middleware (Edge Runtime)
 
@@ -261,15 +325,42 @@ cache.use(sentryPlugin);
 
 ## 🗑️ Eviction Strategies
 
-| Strategy        | Description                | Best for            |
-|-----------------|----------------------------|---------------------|
-| `lru` (default) | Least Recently Used        | General caching     |
-| `lfu`           | Least Frequently Used      | Hot-data retention  |
-| `fifo`          | First In First Out         | Time-ordered data   |
-| `priority`      | Lowest priority first      | Mixed criticality   |
-| `arc`           | Adaptive Replacement Cache | Workload-adaptive   |
-| `ttl`           | Expire-nearest first       | TTL-heavy workloads |
-| `size`          | Largest entries first      | Storage pressure    |
+| Strategy        | Description                          | Best for            |
+|-----------------|--------------------------------------|---------------------|
+| `lru` (default) | Least Recently Used                  | General caching     |
+| `lfu`           | Least Frequently Used                | Hot-data retention  |
+| `fifo`          | First In First Out                   | Time-ordered data   |
+| `priority`      | Lowest priority first                | Mixed criticality   |
+| `segmented`     | Frequency-segmented, scan-resistant  | Workload-adaptive   |
+| `ttl`           | Expire-nearest first                 | TTL-heavy workloads |
+| `size`          | Largest entries first                | Storage pressure    |
+| `custom`        | Your own `EvictionPolicy`            | Special cases       |
+
+> `arc` is a deprecated alias of `segmented` (the previous "ARC" was never a true
+> Adaptive Replacement Cache). Use `segmented` going forward.
+
+### Custom eviction policy
+
+```typescript
+import { createCache, type EvictionPolicy } from 'cache-craft-engine';
+
+const evenKeysFirst: EvictionPolicy = {
+    name: 'even-first',
+    shouldEvict(metas, maxSize, currentSize) {
+        // metas are lightweight CacheEntryMeta (no payloads)
+        let free = currentSize - maxSize;
+        const out: string[] = [];
+        for (const m of metas) {
+            if (free <= 0) break;
+            out.push(m.key);
+            free -= m.size;
+        }
+        return out;
+    },
+};
+
+const cache = createCache({ evictionStrategy: 'custom', evictionPolicy: evenKeysFirst });
+```
 
 ---
 
@@ -318,20 +409,22 @@ await cache.batchDelete(stale.map(r => r.key));
 ## 📦 Batch Operations
 
 ```typescript
-// Parallel — resolves when ALL settle (no early throw)
+// Atomic — batchSet writes all items in a SINGLE IndexedDB transaction
 const setResults = await cache.batchSet([
     {key: 'a', value: 1},
     {key: 'b', value: 2, options: {ttl: 60_000}},
 ]);
 
-const getResults = await cache.batchGet([
-    {key: 'a'},
-    {key: 'b'},
-]);
+// getMany reads many keys in one readonly transaction → Map<key, value|null>
+const map = await cache.getMany(['a', 'b', 'c']);
+map.get('a'); // 1
 
+// batchGet returns per-key BatchResult objects
+const getResults = await cache.batchGet([{key: 'a'}, {key: 'b'}]);
+
+// batchDelete removes all keys in a single transaction
 const deleteResults = await cache.batchDelete(['a', 'b']);
 
-// Check individual results
 for (const r of setResults) {
     if (!r.success) console.error(r.key, r.error);
 }
@@ -412,15 +505,23 @@ const cache = createCache({
     compressionThreshold: 10 * 1024,         // 10 KB — compress larger entries
     namespace: 'v2',              // Key prefix
     evictionStrategy: 'lru',
+    evictionPolicy: undefined,         // your EvictionPolicy when strategy is 'custom'
     enableStats: true,
     enableSync: false,             // Cross-tab BroadcastChannel sync
     encryptionKey: '',                // AES-GCM passphrase ('' = disabled)
     autoCleanup: true,              // Remove expired entries periodically
     cleanupInterval: 60_000,            // 1 minute
+    persistAccessMetadata: true,           // Buffer & flush access-time writes (v0.4)
+    accessMetadataFlushInterval: 1_000,         // Flush cadence in ms (v0.4)
     plugins: [],
     onError: (err) => console.error(err),
 });
 ```
+
+> **Tuning reads:** set `persistAccessMetadata: false` if you don't rely on
+> persisted `lastAccessed`/`accessCount` across reloads — reads then perform
+> **zero** writes. With it `true` (default), updates are coalesced and flushed
+> every `accessMetadataFlushInterval` ms in a single transaction.
 
 ---
 
@@ -432,18 +533,24 @@ const cache = createCache({
 |--------------------|--------------------------------|--------------------------------------------|
 | `set`              | `set<T>(key, value, options?)` | Store a value                              |
 | `get`              | `get<T>(key, options?)`        | Retrieve a value (null if missing/expired) |
+| `getOrSet`         | `getOrSet<T>(key, factory, options?)` | Cache-aside with single-flight stampede protection |
 | `remove`           | `remove(key)`                  | Delete an entry                            |
 | `clear`            | `clear()`                      | Delete all entries, returns count          |
 | `has`              | `has(key)`                     | Check if key exists and is not expired     |
 | `keys`             | `keys(pattern?)`               | List all keys, optionally filtered         |
-| `size`             | `size()`                       | Total storage used (bytes)                 |
-| `count`            | `count()`                      | Number of entries                          |
+| `keysByTag`        | `keysByTag(tag)`               | Keys associated with a tag                  |
+| `invalidateByTag`  | `invalidateByTag(tag)`         | Delete all entries with a tag, returns count |
+| `invalidateByTags` | `invalidateByTags(tags)`       | Delete entries matching ANY tag             |
+| `allTags`          | `allTags()`                    | All tags currently in use                   |
+| `size`             | `size()`                       | Total storage used (bytes) — O(1)          |
+| `count`            | `count()`                      | Number of entries — O(1)                   |
 | `namespace`        | `namespace(ns)`                | Create namespaced sub-cache                |
 | `setBlob`          | `setBlob(key, blob, options?)` | Store a Blob                               |
 | `getBlob`          | `getBlob(key, type?)`          | Retrieve a Blob                            |
-| `batchSet`         | `batchSet(items)`              | Parallel bulk set                          |
-| `batchGet`         | `batchGet(items)`              | Parallel bulk get                          |
-| `batchDelete`      | `batchDelete(keys)`            | Parallel bulk delete                       |
+| `batchSet`         | `batchSet(items)`              | Atomic bulk set (single transaction)       |
+| `getMany`          | `getMany(keys)`                | Read many keys in one transaction → Map     |
+| `batchGet`         | `batchGet(items)`              | Bulk get (per-key results)                 |
+| `batchDelete`      | `batchDelete(keys)`            | Atomic bulk delete (single transaction)    |
 | `query`            | `query(query)`                 | Filter/sort entries                        |
 | `getStats`         | `getStats()`                   | Snapshot of cache statistics               |
 | `getDetailedStats` | `getDetailedStats()`           | Full stats including per-tag data          |
@@ -451,12 +558,13 @@ const cache = createCache({
 | `export`           | `export(options?)`             | Serialisable snapshot                      |
 | `import`           | `import(data, options?)`       | Restore from snapshot                      |
 | `cleanup`          | `cleanup()`                    | Delete expired entries                     |
+| `flushAccessMetadata` | `flushAccessMetadata()`     | Force-persist buffered access metadata      |
 | `getHealth`        | `getHealth()`                  | Health status + issues                     |
 | `getStorageInfo`   | `getStorageInfo()`             | Browser storage quota                      |
 | `use`              | `use(plugin)`                  | Register a plugin                          |
 | `removePlugin`     | `removePlugin(name)`           | Unregister a plugin                        |
 | `on/off/once`      | `on(event, listener)`          | Event subscription                         |
-| `destroy`          | `destroy()`                    | Teardown (close DB, stop timers)           |
+| `destroy`          | `destroy()`                    | Teardown (flush, close DB, stop timers)    |
 
 ### Factory Functions
 
@@ -464,6 +572,16 @@ const cache = createCache({
 |------------------------------|-------------------------------------------------------------------------------|
 | `createCache(config?)`       | Create a `CacheEngine` (throws at runtime on server if IndexedDB is accessed) |
 | `createClientCache(config?)` | Returns `null` during SSR, `CacheEngine` in browser                           |
+
+### React hooks (`cache-craft-engine/react`)
+
+| Hook              | Description                                                       |
+|-------------------|-----------------------------------------------------------------|
+| `useCache`        | Cache-aside data fetching (`data/error/isLoading/refresh/mutate`) |
+| `useCacheValue`   | Read-only subscription to one key (local + cross-tab updates)     |
+| `useCacheStats`   | Live stats snapshot via `useSyncExternalStore`                    |
+| `useCacheEngine`  | Stable shared `CacheEngine` for a given config                    |
+| `getSharedCache`  | Imperative access to the per-config engine singleton             |
 
 ---
 

@@ -2,6 +2,46 @@
 
 All notable changes to CacheCraft will be documented in this file.
 
+## [0.4.0] - 2026-06-15
+
+### ⚡ Performance & Ergonomics Release — Backward Compatible
+
+### Added
+- **In-memory metadata index** — every entry's lightweight metadata (size, timestamps,
+  access count, tags, flags) is held in memory and hydrated once on first DB open.
+  `size()`, `count()`, `keys()`, eviction, query pre-filtering and tag lookups no longer
+  scan IndexedDB or deserialize payloads.
+- **`getOrSet(key, factory, options?)`** — cache-aside helper with single-flight
+  **stampede protection** (concurrent misses share one factory call), plus
+  `staleWhileRevalidate`, `ttlOnRevalidate` and `fallbackToStale`.
+- **Tag invalidation API** — `invalidateByTag()`, `invalidateByTags()`, `keysByTag()`,
+  `allTags()`, backed by an in-memory tag index (no full scan).
+- **Atomic batch writes** — `batchSet()` and `batchDelete()` now execute in a single
+  IndexedDB transaction. New **`getMany(keys)`** reads many keys in one transaction.
+- **Official React hooks** via the `cache-craft-engine/react` subpath:
+  `useCache`, `useCacheValue`, `useCacheStats`, `useCacheEngine`, `getSharedCache`.
+  SSR-safe; share one engine per config.
+- **Custom eviction policies** — `evictionStrategy: 'custom'` + `evictionPolicy`.
+- **`flushAccessMetadata()`** — manually persist buffered access metadata.
+- New config: `persistAccessMetadata`, `accessMetadataFlushInterval`, `evictionPolicy`.
+- New exported types: `CacheEntryMeta`, `GetOrSetOptions`.
+
+### Changed
+- **Read path no longer writes on every `get`.** Access-time / access-count updates are
+  buffered in memory and flushed periodically (configurable), removing write amplification.
+- **`set` stats are incremental** — no full-database rescan after each operation.
+- `setBlob` now emits `set` events, updates stats and broadcasts cross-tab like `set`.
+- Eviction policies now receive lightweight `CacheEntryMeta[]` instead of full entries.
+- `arc` strategy renamed to **`segmented`** (frequency-segmented, scan-resistant LRU).
+  `arc` and `ARCEvictionPolicy` remain as deprecated aliases.
+
+### Fixed
+- Compression combined with encoding/encryption now round-trips correctly
+  (`isEncoded` is no longer set when a value is compressed; encrypted+compressed
+  payloads are restored properly on read).
+- `query()` no longer performs a redundant second read per result; values are decoded
+  through a single shared pipeline.
+
 ## [0.2.0] - 2026-01-14
 
 ### 🎉 Major Release - 100% Backward Compatible

@@ -1,3 +1,53 @@
+# Migration Guide
+
+## v0.3 → v0.4
+
+v0.4 is **backward compatible** — existing code keeps working. A few notes:
+
+### Recommended adoptions
+
+- **Replace manual get-then-set with `getOrSet`.** This is the headline feature and
+  also protects you from cache stampedes:
+  ```typescript
+  // before
+  let user = await cache.get(key);
+  if (!user) { user = await fetchUser(); await cache.set(key, user, { ttl }); }
+
+  // after
+  const user = await cache.getOrSet(key, fetchUser, { ttl });
+  ```
+- **Use tag invalidation** instead of querying + deleting:
+  ```typescript
+  // before
+  const stale = await cache.query({ tags: ['posts'] });
+  await cache.batchDelete(stale.map(r => r.key));
+  // after
+  await cache.invalidateByTag('posts');
+  ```
+- **React users:** switch from hand-rolled hooks to `cache-craft-engine/react`
+  (`useCache`, `useCacheValue`, `useCacheStats`).
+
+### Behavioural changes to be aware of
+
+- **`get` no longer writes synchronously on every read.** Access-time/access-count
+  updates are buffered and flushed periodically. If you depend on these being
+  immediately durable, set `persistAccessMetadata: true` (the default) and/or call
+  `await cache.flushAccessMetadata()`; or set `persistAccessMetadata: false` to skip
+  the writes entirely. Call `destroy()` on teardown to flush pending updates.
+- **`arc` → `segmented`.** `evictionStrategy: 'arc'` still works (deprecated alias),
+  but the honest name is `'segmented'`. The behaviour is a frequency-segmented,
+  scan-resistant LRU (the old "ARC" was never a true Adaptive Replacement Cache).
+- **Custom `EvictionPolicy` implementations** now receive `CacheEntryMeta[]`
+  (lightweight metadata, no `entry.value`/payloads) instead of `CacheEntryWithKey[]`.
+  Update field access from `e.entry.size` to `m.size`, `e.entry.lastAccessed` to
+  `m.lastAccessed`, etc. The `key` field is unchanged.
+- **`batchSet`/`batchDelete` are now atomic** (single transaction). If you previously
+  relied on partial success when some items failed mid-batch, note that a transaction
+  error now rolls back the whole batch (per-item *preparation* errors — e.g. a value
+  that can't be serialized — are still reported individually and don't abort the rest).
+
+---
+
 # Migration Guide: v1 → v2
 
 CacheCraft v0.2 is **100% backward compatible** with v1. Your existing code will work without any changes!

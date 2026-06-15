@@ -1,5 +1,5 @@
 // ==============================
-// CacheCraft Types — v0.3
+// CacheCraft Types — v0.4
 // Browser + SSR + Next.js + React compatible
 // ==============================
 
@@ -58,6 +58,21 @@ export type CacheGetOptions<T> = {
     onGet?: (key: string, value: T | null) => void;
 };
 
+export type GetOrSetOptions<T> = CacheSetOptions & {
+    /**
+     * Serve a stale (expired) value immediately and refresh in the
+     * background instead of blocking on the factory. Default: false.
+     */
+    staleWhileRevalidate?: boolean;
+    /** TTL applied to the value produced by the background refresh. */
+    ttlOnRevalidate?: number;
+    /**
+     * When true, a rejected factory does not throw if a stale value is
+     * available — the stale value is returned instead. Default: false.
+     */
+    fallbackToStale?: boolean;
+};
+
 export type CacheConfig = {
     dbName?: string;
     version?: number;
@@ -80,6 +95,19 @@ export type CacheConfig = {
     autoCleanup?: boolean;
     /** Auto-cleanup interval in ms (default: 60 000) */
     cleanupInterval?: number;
+    /**
+     * Persist access-time / access-count updates back to IndexedDB on read.
+     * When false, hit metadata lives only in the in-memory index until the
+     * next write, eliminating read-path write amplification. (default: true)
+     */
+    persistAccessMetadata?: boolean;
+    /**
+     * Flush buffered access-metadata writes to IndexedDB at most this often
+     * (ms). Only used when persistAccessMetadata is true. (default: 1000)
+     */
+    accessMetadataFlushInterval?: number;
+    /** Optional custom eviction policy (used when evictionStrategy is "custom"). */
+    evictionPolicy?: EvictionPolicy;
 };
 
 // ==============================
@@ -91,7 +119,8 @@ export type EvictionStrategy =
     | "lfu"
     | "fifo"
     | "priority"
-    | "arc"
+    | "segmented"
+    | "arc" // deprecated alias of "segmented" — kept for backwards-compat
     | "ttl"
     | "size"
     | "custom";
@@ -99,11 +128,30 @@ export type EvictionStrategy =
 export interface EvictionPolicy {
     name: string;
     shouldEvict(
-        entries: CacheEntryWithKey[],
+        entries: CacheEntryMeta[],
         maxSize: number,
         currentSize: number
     ): string[];
 }
+
+/**
+ * Lightweight metadata view of an entry used by eviction, query filtering and
+ * stats. Carries everything *except* the (potentially large) stored value, so
+ * the hot paths never have to read or deserialize payloads.
+ */
+export type CacheEntryMeta = {
+    key: string;
+    size: number;
+    createdAt: number;
+    lastAccessed: number;
+    accessCount: number;
+    expiresAt?: number | undefined;
+    priority?: number | undefined;
+    tags?: readonly string[] | undefined;
+    isCompressed: boolean;
+    isEncrypted: boolean;
+    isEncoded: boolean;
+};
 
 export type CacheEntryWithKey = {
     key: string;

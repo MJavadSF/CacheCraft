@@ -437,5 +437,80 @@ async function runAllExamples() {
     }
 }
 
+// ==============================
+// Example (v0.4): getOrSet with stampede protection
+// ==============================
+
+async function getOrSetExample() {
+    console.log('=== getOrSet (cache-aside) ===');
+
+    const cache = new CacheEngine({ dbName: 'getorset-demo' });
+
+    let fetchCount = 0;
+    const fetchUser = async (id: number) => {
+        fetchCount++;
+        await new Promise((r) => setTimeout(r, 30));
+        return { id, name: `User ${id}` };
+    };
+
+    // Fire 5 concurrent requests for the same key — factory runs ONCE.
+    const results = await Promise.all(
+        Array.from({ length: 5 }, () =>
+            cache.getOrSet('user:1', () => fetchUser(1), { ttl: 60_000, tags: ['users'] })
+        )
+    );
+
+    console.log('All resolved:', results.every((r) => r.id === 1));
+    console.log('Factory invocations (expected 1):', fetchCount);
+
+    // Subsequent call is served from cache (no fetch).
+    await cache.getOrSet('user:1', () => fetchUser(1));
+    console.log('Factory invocations after cache hit (still 1):', fetchCount);
+}
+
+// ==============================
+// Example (v0.4): Tag invalidation
+// ==============================
+
+async function tagInvalidationExample() {
+    console.log('=== Tag invalidation ===');
+
+    const cache = new CacheEngine({ dbName: 'tags-demo' });
+
+    await cache.set('post:1', { title: 'Hello' }, { tags: ['posts', 'home'] });
+    await cache.set('post:2', { title: 'World' }, { tags: ['posts'] });
+    await cache.set('user:1', { name: 'Ali' }, { tags: ['users'] });
+
+    console.log('Keys tagged "posts":', await cache.keysByTag('posts'));
+    console.log('All tags:', cache.allTags());
+
+    const removed = await cache.invalidateByTag('posts');
+    console.log('Removed by tag "posts":', removed);
+    console.log('post:1 after invalidation:', await cache.get('post:1')); // null
+    console.log('user:1 untouched:', await cache.get('user:1'));
+}
+
+// ==============================
+// Example (v0.4): Atomic batch + getMany
+// ==============================
+
+async function atomicBatchExample() {
+    console.log('=== Atomic batch + getMany ===');
+
+    const cache = new CacheEngine({ dbName: 'batch-demo' });
+
+    await cache.batchSet([
+        { key: 'a', value: 1 },
+        { key: 'b', value: 2, options: { ttl: 60_000 } },
+        { key: 'c', value: 3, options: { tags: ['nums'] } },
+    ]);
+
+    const many = await cache.getMany<number>(['a', 'b', 'c', 'missing']);
+    console.log('getMany:', Object.fromEntries(many));
+
+    await cache.batchDelete(['a', 'b']);
+    console.log('count after batchDelete:', await cache.count());
+}
+
 // Run examples
 runAllExamples();

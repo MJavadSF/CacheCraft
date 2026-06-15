@@ -302,14 +302,13 @@ export class PrefetchPlugin implements CachePlugin {
 export class WarmupPlugin implements CachePlugin {
     name = "warmup";
     version = "1.0.0";
-    private warmupData: Map<string, { value: any; options?: CacheSetOptions }> = new Map();
+    private warmupData: Map<string, { value: unknown; options?: CacheSetOptions }> = new Map();
 
-    addWarmupData(key: string, value: any, options?: CacheSetOptions): void {
-        // @ts-ignore
+    addWarmupData(key: string, value: unknown, options?: CacheSetOptions): void {
         this.warmupData.set(key, { value, options });
     }
 
-    async warmup(cache: any): Promise<void> {
+    async warmup(cache: { set: (k: string, v: unknown, o?: CacheSetOptions) => Promise<void> }): Promise<void> {
         for (const [key, data] of this.warmupData.entries()) {
             await cache.set(key, data.value, data.options);
         }
@@ -378,18 +377,17 @@ export class PersistencePlugin implements CachePlugin {
 export class AnalyticsPlugin implements CachePlugin {
     name = "analytics";
     version = "1.0.0";
-    private onEvent?: (event: string, data: any) => void;
+    private onEvent?: (event: string, data: Record<string, unknown>) => void;
 
-    constructor(onEvent?: (event: string, data: any) => void) {
-        // @ts-ignore
+    constructor(onEvent?: (event: string, data: Record<string, unknown>) => void) {
         this.onEvent = onEvent;
     }
 
-    afterSet(key: string, value: any, entry: CacheEntry): void {
+    afterSet(key: string, _value: unknown, entry: CacheEntry): void {
         this.track("cache_set", { key, size: entry.size });
     }
 
-    afterGet(key: string, value: any, entry: CacheEntry | null): void {
+    afterGet(key: string, _value: unknown, entry: CacheEntry | null): void {
         this.track("cache_get", { key, hit: !!entry });
     }
 
@@ -397,10 +395,8 @@ export class AnalyticsPlugin implements CachePlugin {
         this.track("cache_evict", { count: keys.length, keys });
     }
 
-    private track(event: string, data: any): void {
-        if (this.onEvent) {
-            this.onEvent(event, data);
-        }
+    private track(event: string, data: Record<string, unknown>): void {
+        if (this.onEvent) this.onEvent(event, data);
     }
 }
 
