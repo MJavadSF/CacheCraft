@@ -1,17 +1,14 @@
-import { EvictionPolicy, CacheEntryMeta } from "./types";
+import type { CacheEntryMeta, EvictionPolicy } from "./types";
 
 // ==============================
-// CacheCraft Eviction Policies — v0.4
+// CacheCraft Eviction Policies
 //
 // All policies operate on lightweight CacheEntryMeta (no payloads), so the
 // engine can decide what to evict without ever reading stored values.
 // ==============================
 
 /** Greedy "free the oldest/least-valuable until under budget" helper. */
-function collect(
-    sorted: CacheEntryMeta[],
-    bytesToFree: number
-): string[] {
+function collect(sorted: CacheEntryMeta[], bytesToFree: number): string[] {
     const toEvict: string[] = [];
     let remaining = bytesToFree;
     for (const item of sorted) {
@@ -102,9 +99,11 @@ export class SegmentedEvictionPolicy implements EvictionPolicy {
     shouldEvict(entries: CacheEntryMeta[], maxSize: number, currentSize: number): string[] {
         if (currentSize <= maxSize) return [];
 
-        const cold = entries.filter((e) => e.accessCount <= 1)
+        const cold = entries
+            .filter((e) => e.accessCount <= 1)
             .sort((a, b) => a.lastAccessed - b.lastAccessed);
-        const hot = entries.filter((e) => e.accessCount > 1)
+        const hot = entries
+            .filter((e) => e.accessCount > 1)
             .sort((a, b) => {
                 if (a.accessCount !== b.accessCount) return a.accessCount - b.accessCount;
                 return a.lastAccessed - b.lastAccessed;
@@ -137,14 +136,29 @@ export class TTLEvictionPolicy implements EvictionPolicy {
         const expired = entries.filter((e) => e.expiresAt !== undefined && e.expiresAt < now);
 
         const toEvict = expired.map((e) => e.key);
-        const freed = expired.reduce((sum, e) => sum + e.size, 0);
+        let remaining = currentSize - expired.reduce((sum, e) => sum + e.size, 0) - maxSize;
 
-        if (currentSize - freed > maxSize) {
-            const expiredKeys = new Set(toEvict);
+        if (remaining > 0) {
+            const evicted = new Set(toEvict);
             const withTTL = entries
-                .filter((e) => e.expiresAt !== undefined && !expiredKeys.has(e.key))
+                .filter((e) => e.expiresAt !== undefined && !evicted.has(e.key))
                 .sort((a, b) => (a.expiresAt ?? 0) - (b.expiresAt ?? 0));
-            toEvict.push(...collect(withTTL, currentSize - freed - maxSize));
+            const byTtl = collect(withTTL, remaining);
+            toEvict.push(...byTtl);
+            const byTtlSet = new Set(byTtl);
+            for (const key of byTtl) evicted.add(key);
+            remaining -= withTTL
+                .filter((e) => byTtlSet.has(e.key))
+                .reduce((sum, e) => sum + e.size, 0);
+
+            // Still over budget (entries without a TTL)? Fall back to LRU so the cache
+            // can never grow past maxSize.
+            if (remaining > 0) {
+                const rest = entries
+                    .filter((e) => !evicted.has(e.key))
+                    .sort((a, b) => a.lastAccessed - b.lastAccessed);
+                toEvict.push(...collect(rest, remaining));
+            }
         }
 
         return toEvict;
@@ -171,14 +185,22 @@ export class SizeBasedEvictionPolicy implements EvictionPolicy {
 
 export function createEvictionPolicy(strategy: string): EvictionPolicy {
     switch (strategy) {
-        case "lru":       return new LRUEvictionPolicy();
-        case "lfu":       return new LFUEvictionPolicy();
-        case "fifo":      return new FIFOEvictionPolicy();
-        case "priority":  return new PriorityEvictionPolicy();
+        case "lru":
+            return new LRUEvictionPolicy();
+        case "lfu":
+            return new LFUEvictionPolicy();
+        case "fifo":
+            return new FIFOEvictionPolicy();
+        case "priority":
+            return new PriorityEvictionPolicy();
         case "segmented":
-        case "arc":       return new SegmentedEvictionPolicy();
-        case "ttl":       return new TTLEvictionPolicy();
-        case "size":      return new SizeBasedEvictionPolicy();
-        default:          return new LRUEvictionPolicy();
+        case "arc":
+            return new SegmentedEvictionPolicy();
+        case "ttl":
+            return new TTLEvictionPolicy();
+        case "size":
+            return new SizeBasedEvictionPolicy();
+        default:
+            return new LRUEvictionPolicy();
     }
 }

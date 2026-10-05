@@ -1,4 +1,11 @@
-import { CachePlugin, CacheSetOptions, CacheGetOptions, CacheEntry } from "./types";
+import type {
+    CacheEntry,
+    CacheGetOptions,
+    CachePlugin,
+    CachePluginHost,
+    CacheSetOptions,
+} from "./types";
+import { CacheError, getSize, matchesPattern } from "./utils";
 
 // ==============================
 // Logger Plugin
@@ -10,19 +17,15 @@ export class LoggerPlugin implements CachePlugin {
     private logger: (message: string) => void;
 
     constructor(logger?: (message: string) => void) {
-        this.logger = logger || console.log;
+        this.logger = logger ?? ((message) => console.log(message));
     }
 
-    afterSet(key: string, value: any, entry: CacheEntry): void {
+    afterSet(key: string, _value: unknown, entry: CacheEntry): void {
         this.logger(`[CACHE] Set: ${key} (${entry.size} bytes)`);
     }
 
-    afterGet(key: string, value: any, entry: CacheEntry | null): void {
-        if (entry) {
-            this.logger(`[CACHE] Hit: ${key}`);
-        } else {
-            this.logger(`[CACHE] Miss: ${key}`);
-        }
+    afterGet(key: string, _value: unknown, entry: CacheEntry | null): void {
+        this.logger(entry ? `[CACHE] Hit: ${key}` : `[CACHE] Miss: ${key}`);
     }
 
     afterDelete(key: string, existed: boolean): void {
@@ -52,7 +55,7 @@ export class MetricsPlugin implements CachePlugin {
         this.increment(`key:${key}:sets`);
     }
 
-    afterGet(key: string, value: any, entry: CacheEntry | null): void {
+    afterGet(key: string, _value: unknown, entry: CacheEntry | null): void {
         if (entry) {
             this.increment("hits");
             this.increment(`key:${key}:hits`);
@@ -78,12 +81,11 @@ export class MetricsPlugin implements CachePlugin {
     }
 
     private increment(metric: string, by = 1): void {
-        const current = this.metrics.get(metric) || 0;
-        this.metrics.set(metric, current + by);
+        this.metrics.set(metric, (this.metrics.get(metric) ?? 0) + by);
     }
 
     getMetric(metric: string): number {
-        return this.metrics.get(metric) || 0;
+        return this.metrics.get(metric) ?? 0;
     }
 
     getAllMetrics(): Record<string, number> {
@@ -99,21 +101,22 @@ export class MetricsPlugin implements CachePlugin {
 // Validation Plugin
 // ==============================
 
+// biome-ignore lint/suspicious/noExplicitAny: validators receive arbitrary cached values; `any` keeps typed callbacks assignable
+type Validator = (value: any) => boolean;
+
 export class ValidationPlugin implements CachePlugin {
     name = "validation";
     version = "1.0.0";
-    private validators: Map<RegExp, (value: any) => boolean> = new Map();
+    private validators: Map<RegExp, Validator> = new Map();
 
-    addValidator(pattern: RegExp, validator: (value: any) => boolean): void {
+    addValidator(pattern: RegExp, validator: Validator): void {
         this.validators.set(pattern, validator);
     }
 
-    beforeSet(key: string, value: any): boolean {
-        for (const [pattern, validator] of this.validators.entries()) {
-            if (pattern.test(key)) {
-                if (!validator(value)) {
-                    throw new Error(`Validation failed for key: ${key}`);
-                }
+    beforeSet(key: string, value: unknown): boolean {
+        for (const [pattern, validator] of this.validators) {
+            if (matchesPattern(key, pattern) && !validator(value)) {
+                throw new CacheError(`Validation failed for key: ${key}`, "VALIDATION_FAILED");
             }
         }
         return true;
@@ -121,7 +124,7 @@ export class ValidationPlugin implements CachePlugin {
 }
 
 // ==============================
-// TTL Refresh Plugin
+// TTL Refresh Plugin (sliding expiration)
 // ==============================
 
 export class TTLRefreshPlugin implements CachePlugin {
@@ -135,14 +138,15 @@ export class TTLRefreshPlugin implements CachePlugin {
         this.refreshOnAccess = refreshOnAccess;
     }
 
-    async afterGet(
-        key: string,
-        value: any,
+    afterGet(
+        _key: string,
+        _value: unknown,
         entry: CacheEntry | null,
-        options?: CacheGetOptions<any>
-    ): Promise<void> {
-        if (this.refreshOnAccess && entry && entry.expiresAt) {
-            // Extend TTL on access
+        _options?: CacheGetOptions<unknown>
+    ): void {
+        // The engine applies and persists a changed `entry.expiresAt` (only entries
+        // that already have a TTL slide).
+        if (this.refreshOnAccess && entry && entry.expiresAt !== undefined) {
             entry.expiresAt = Date.now() + this.refreshTTL;
         }
     }
@@ -161,10 +165,8 @@ export class CompressionOptimizerPlugin implements CachePlugin {
         this.threshold = threshold;
     }
 
-    beforeSet(key: string, value: any, options?: CacheSetOptions): boolean {
-        const size = new Blob([JSON.stringify(value)]).size;
-        if (size > this.threshold && !options?.forceCompress && options) {
-            // Modify options in place
+    beforeSet(_key: string, value: unknown, options?: CacheSetOptions): boolean {
+        if (options && !options.forceCompress && getSize(value) > this.threshold) {
             options.forceCompress = true;
         }
         return true;
@@ -180,38 +182,46 @@ export class TagManagerPlugin implements CachePlugin {
     version = "1.0.0";
     private tagIndex: Map<string, Set<string>> = new Map();
 
-    afterSet(key: string, value: any, entry: CacheEntry): void {
-        if (entry.tags) {
-            for (const tag of entry.tags) {
-                if (!this.tagIndex.has(tag)) {
-                    this.tagIndex.set(tag, new Set());
-                }
-                this.tagIndex.get(tag)!.add(key);
+    afterSet(key: string, _value: unknown, entry: CacheEntry): void {
+        // An overwrite may carry different tags — drop the old associations first.
+        this.forget(key);
+        for (const tag of entry.tags ?? []) {
+            let keys = this.tagIndex.get(tag);
+            if (!keys) {
+                keys = new Set();
+                this.tagIndex.set(tag, keys);
             }
+            keys.add(key);
         }
     }
 
     afterDelete(key: string): void {
-        // Remove key from all tags
-        for (const keys of this.tagIndex.values()) {
-            keys.delete(key);
-        }
+        this.forget(key);
+    }
+
+    onEvict(keys: string[]): void {
+        for (const key of keys) this.forget(key);
     }
 
     afterClear(): void {
         this.tagIndex.clear();
     }
 
+    private forget(key: string): void {
+        for (const [tag, keys] of this.tagIndex) {
+            keys.delete(key);
+            if (keys.size === 0) this.tagIndex.delete(tag);
+        }
+    }
+
     getKeysWithTag(tag: string): string[] {
-        return Array.from(this.tagIndex.get(tag) || []);
+        return Array.from(this.tagIndex.get(tag) ?? []);
     }
 
     getTagsForKey(key: string): string[] {
         const tags: string[] = [];
-        for (const [tag, keys] of this.tagIndex.entries()) {
-            if (keys.has(key)) {
-                tags.push(tag);
-            }
+        for (const [tag, keys] of this.tagIndex) {
+            if (keys.has(key)) tags.push(tag);
         }
         return tags;
     }
@@ -250,16 +260,24 @@ export class RateLimiterPlugin implements CachePlugin {
         const limit = this.limits.get(key);
 
         if (!limit || now > limit.resetAt) {
+            if (this.limits.size >= 1000) this.prune(now);
             this.limits.set(key, { count: 1, resetAt: now + this.windowMs });
             return true;
         }
 
         if (limit.count >= this.maxRequests) {
-            throw new Error(`Rate limit exceeded for key: ${key}`);
+            throw new CacheError(`Rate limit exceeded for key: ${key}`, "RATE_LIMITED");
         }
 
         limit.count++;
         return true;
+    }
+
+    /** Drop finished windows so the map cannot grow without bound. */
+    private prune(now: number): void {
+        for (const [key, limit] of this.limits) {
+            if (now > limit.resetAt) this.limits.delete(key);
+        }
     }
 
     reset(key?: string): void {
@@ -275,22 +293,62 @@ export class RateLimiterPlugin implements CachePlugin {
 // Prefetch Plugin
 // ==============================
 
+/**
+ * A loader may return the related values — as `{ [key]: value }` (only the rule's
+ * `relatedKeys` are stored) or as an array aligned with `relatedKeys` — or return nothing
+ * and populate the cache itself (the pre-0.5 usage, still supported).
+ */
+type PrefetchLoader = () => Promise<unknown>;
+
 export class PrefetchPlugin implements CachePlugin {
     name = "prefetch";
     version = "1.0.0";
-    private prefetchRules: Map<string, { keys: string[]; loader: () => Promise<any> }> = new Map();
+    private prefetchRules: Map<string, { keys: string[]; loader: PrefetchLoader }> = new Map();
+    private running: Set<string> = new Set();
+    private host: CachePluginHost | null = null;
 
-    addPrefetchRule(triggerKey: string, relatedKeys: string[], loader: () => Promise<any>): void {
+    init(host: CachePluginHost): void {
+        this.host = host;
+    }
+
+    addPrefetchRule(triggerKey: string, relatedKeys: string[], loader: PrefetchLoader): void {
         this.prefetchRules.set(triggerKey, { keys: relatedKeys, loader });
     }
 
-    async afterGet(key: string): Promise<void> {
+    afterGet(key: string, _value: unknown, entry: CacheEntry | null): void {
         const rule = this.prefetchRules.get(key);
-        if (rule) {
-            // Trigger prefetch in background
-            rule.loader().catch(() => {
-                // Silent fail
-            });
+        if (!rule || !entry || !this.host || this.running.has(key)) return;
+        void this.prefetch(key, rule, this.host);
+    }
+
+    private async prefetch(
+        trigger: string,
+        rule: { keys: string[]; loader: PrefetchLoader },
+        host: CachePluginHost
+    ): Promise<void> {
+        this.running.add(trigger);
+        try {
+            // Skip the network when everything is already cached.
+            const cached = await Promise.all(rule.keys.map((k) => host.has(k)));
+            if (cached.every(Boolean)) return;
+
+            const loaded = await rule.loader();
+            if (typeof loaded !== "object" || loaded === null) return;
+            // Never store anything outside the rule's own keys: a legacy loader may return
+            // an unrelated payload (e.g. a parsed response) that was always discarded.
+            const pairs: Array<[string, unknown]> = Array.isArray(loaded)
+                ? rule.keys.map((k, i): [string, unknown] => [k, loaded[i]])
+                : rule.keys.map((k): [string, unknown] => [
+                      k,
+                      (loaded as Record<string, unknown>)[k],
+                  ]);
+            for (const [k, v] of pairs) {
+                if (v !== undefined) await host.set(k, v);
+            }
+        } catch {
+            // Prefetching is best-effort and must never surface errors.
+        } finally {
+            this.running.delete(trigger);
         }
     }
 }
@@ -302,14 +360,17 @@ export class PrefetchPlugin implements CachePlugin {
 export class WarmupPlugin implements CachePlugin {
     name = "warmup";
     version = "1.0.0";
-    private warmupData: Map<string, { value: unknown; options?: CacheSetOptions }> = new Map();
+    private warmupData: Map<string, { value: unknown; options?: CacheSetOptions | undefined }> =
+        new Map();
 
     addWarmupData(key: string, value: unknown, options?: CacheSetOptions): void {
         this.warmupData.set(key, { value, options });
     }
 
-    async warmup(cache: { set: (k: string, v: unknown, o?: CacheSetOptions) => Promise<void> }): Promise<void> {
-        for (const [key, data] of this.warmupData.entries()) {
+    async warmup(cache: {
+        set: (k: string, v: unknown, o?: CacheSetOptions) => Promise<void>;
+    }): Promise<void> {
+        for (const [key, data] of this.warmupData) {
             await cache.set(key, data.value, data.options);
         }
     }
@@ -328,43 +389,47 @@ export class PersistencePlugin implements CachePlugin {
         this.storageKey = storageKey;
     }
 
-    async afterSet(key: string, value: any): Promise<void> {
-        this.saveToLocalStorage(key, value);
-    }
-
-    async afterDelete(key: string): Promise<void> {
-        this.removeFromLocalStorage(key);
-    }
-
-    private saveToLocalStorage(key: string, value: any): void {
-        try {
-            const existing = localStorage.getItem(this.storageKey);
-            const data = existing ? JSON.parse(existing) : {};
+    afterSet(key: string, value: unknown): void {
+        this.update((data) => {
             data[key] = value;
+        });
+    }
+
+    afterDelete(key: string): void {
+        this.update((data) => {
+            delete data[key];
+        });
+    }
+
+    onEvict(keys: string[]): void {
+        this.update((data) => {
+            for (const key of keys) delete data[key];
+        });
+    }
+
+    afterClear(): void {
+        try {
+            localStorage.removeItem(this.storageKey);
+        } catch {
+            // LocalStorage unavailable
+        }
+    }
+
+    private update(mutate: (data: Record<string, unknown>) => void): void {
+        try {
+            const data = this.loadFromLocalStorage();
+            mutate(data);
             localStorage.setItem(this.storageKey, JSON.stringify(data));
-        } catch (error) {
+        } catch {
             // LocalStorage full or disabled
         }
     }
 
-    private removeFromLocalStorage(key: string): void {
+    loadFromLocalStorage(): Record<string, unknown> {
         try {
             const existing = localStorage.getItem(this.storageKey);
-            if (existing) {
-                const data = JSON.parse(existing);
-                delete data[key];
-                localStorage.setItem(this.storageKey, JSON.stringify(data));
-            }
-        } catch (error) {
-            // Ignore
-        }
-    }
-
-    loadFromLocalStorage(): Record<string, any> {
-        try {
-            const existing = localStorage.getItem(this.storageKey);
-            return existing ? JSON.parse(existing) : {};
-        } catch (error) {
+            return existing ? (JSON.parse(existing) as Record<string, unknown>) : {};
+        } catch {
             return {};
         }
     }
@@ -377,7 +442,7 @@ export class PersistencePlugin implements CachePlugin {
 export class AnalyticsPlugin implements CachePlugin {
     name = "analytics";
     version = "1.0.0";
-    private onEvent?: (event: string, data: Record<string, unknown>) => void;
+    private onEvent: ((event: string, data: Record<string, unknown>) => void) | undefined;
 
     constructor(onEvent?: (event: string, data: Record<string, unknown>) => void) {
         this.onEvent = onEvent;
@@ -396,7 +461,7 @@ export class AnalyticsPlugin implements CachePlugin {
     }
 
     private track(event: string, data: Record<string, unknown>): void {
-        if (this.onEvent) this.onEvent(event, data);
+        this.onEvent?.(event, data);
     }
 }
 
@@ -413,14 +478,12 @@ export class DebugPlugin implements CachePlugin {
         this.verbose = verbose;
     }
 
-    beforeSet(key: string, value: any, options?: CacheSetOptions): boolean {
-        if (this.verbose) {
-            console.debug("[CACHE DEBUG] Before Set:", { key, value });
-        }
+    beforeSet(key: string, value: unknown): boolean {
+        if (this.verbose) console.debug("[CACHE DEBUG] Before Set:", { key, value });
         return true;
     }
 
-    afterSet(key: string, value: any, entry: CacheEntry): void {
+    afterSet(key: string, _value: unknown, entry: CacheEntry): void {
         console.debug("[CACHE DEBUG] After Set:", {
             key,
             size: entry.size,
@@ -429,14 +492,12 @@ export class DebugPlugin implements CachePlugin {
         });
     }
 
-    beforeGet(key: string, options?: CacheGetOptions<any>): boolean {
-        if (this.verbose) {
-            console.debug("[CACHE DEBUG] Before Get:", { key });
-        }
+    beforeGet(key: string): boolean {
+        if (this.verbose) console.debug("[CACHE DEBUG] Before Get:", { key });
         return true;
     }
 
-    afterGet(key: string, value: any, entry: CacheEntry | null): void {
+    afterGet(key: string, _value: unknown, entry: CacheEntry | null): void {
         console.debug("[CACHE DEBUG] After Get:", {
             key,
             hit: !!entry,
@@ -445,6 +506,10 @@ export class DebugPlugin implements CachePlugin {
     }
 
     onError(error: Error, operation: string): void {
-        console.error("[CACHE DEBUG] Error:", { operation, error: error.message, stack: error.stack });
+        console.error("[CACHE DEBUG] Error:", {
+            operation,
+            error: error.message,
+            stack: error.stack,
+        });
     }
 }

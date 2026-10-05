@@ -1,23 +1,23 @@
 "use client";
 
 // ==============================
-// CacheCraft React Adapter — v0.4
+// CacheCraft React Adapter
 //
 // Optional entry point: `import { useCache } from "cache-craft-engine/react"`.
 // SSR-safe — every browser-only effect is guarded so it is inert on the server.
 // Requires React 18+ (uses useSyncExternalStore).
 // ==============================
 
-import {
-    useCallback,
-    useEffect,
-    useRef,
-    useState,
-    useSyncExternalStore,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { CacheEngine } from "./cache-engine";
-import type { CacheConfig, GetOrSetOptions, CacheEvent } from "./types";
-import { isSSR } from "./utils";
+import type {
+    CacheConfig,
+    CacheEvent,
+    CacheSetOptions,
+    CacheStats,
+    GetOrSetOptions,
+} from "./types";
+import { isSSR, toError } from "./utils";
 
 // ------------------------------
 // Shared per-config singletons so multiple hooks/components reading the same
@@ -46,15 +46,18 @@ export function getSharedCache(config?: CacheConfig): CacheEngine | null {
 }
 
 // ------------------------------
-// useCacheEngine — stable engine reference for a component tree.
+// useCacheEngine — stable engine reference for a component tree. Follows the
+// config when `dbName` / `namespace` / `storeName` change, and never creates a
+// shared engine when an explicit one is supplied.
 // ------------------------------
 
-export function useCacheEngine(config?: CacheConfig): CacheEngine | null {
-    const ref = useRef<CacheEngine | null>(null);
-    if (ref.current === null && !isSSR()) {
-        ref.current = getSharedCache(config);
-    }
-    return ref.current;
+export function useCacheEngine(
+    config?: CacheConfig,
+    explicit?: CacheEngine | null
+): CacheEngine | null {
+    const key = registryKey(config);
+    // biome-ignore lint/correctness/useExhaustiveDependencies: the config is identified by its registry key
+    return useMemo(() => explicit ?? getSharedCache(config), [explicit, key]);
 }
 
 // ------------------------------
@@ -85,12 +88,25 @@ export type UseCacheOptions<T> = GetOrSetOptions<T> & {
     engine?: CacheEngine | null;
 };
 
+/** Strip the hook-only options so only real cache options reach the engine. */
+function toCacheOptions<T>(options?: UseCacheOptions<T>): GetOrSetOptions<T> {
+    if (!options) return {};
+    const {
+        enabled: _e,
+        revalidateOnFocus: _r,
+        config: _c,
+        engine: _en,
+        ...cacheOptions
+    } = options;
+    return cacheOptions;
+}
+
 export function useCache<T>(
     key: string | null,
     factory: () => Promise<T> | T,
     options?: UseCacheOptions<T>
 ): UseCacheState<T> {
-    const engine = options?.engine ?? useCacheEngine(options?.config);
+    const engine = useCacheEngine(options?.config, options?.engine);
     const enabled = (options?.enabled ?? true) && key !== null;
 
     const [data, setData] = useState<T | undefined>(undefined);
@@ -98,42 +114,72 @@ export function useCache<T>(
     const [isLoading, setIsLoading] = useState<boolean>(enabled);
     const [isValidating, setIsValidating] = useState<boolean>(false);
 
-    // Keep the latest factory without retriggering the effect on each render.
+    // Always read the latest factory/options without retriggering effects.
     const factoryRef = useRef(factory);
     factoryRef.current = factory;
+    const optionsRef = useRef(options);
+    optionsRef.current = options;
+
+    // Only the most recent request (for the current key) may update state.
+    const requestRef = useRef(0);
 
     const load = useCallback(
         async (force = false) => {
             if (!engine || key === null) return;
+            const request = ++requestRef.current;
+            const isCurrent = (): boolean => request === requestRef.current;
+            const cacheOptions = toCacheOptions(optionsRef.current);
+
             setIsValidating(true);
             try {
-                if (force) await engine.remove(key);
-                const value = await engine.getOrSet<T>(key, () => factoryRef.current(), options);
+                let value: T;
+                if (force) {
+                    // Refresh in place: if the factory fails, the cached value survives.
+                    value = await factoryRef.current();
+                    await engine.set(key, value, cacheOptions as CacheSetOptions);
+                } else {
+                    value = await engine.getOrSet<T>(key, () => factoryRef.current(), cacheOptions);
+                }
+                if (!isCurrent()) return;
                 setData(value);
                 setError(null);
             } catch (err) {
-                setError(err as Error);
+                if (isCurrent()) setError(toError(err));
             } finally {
-                setIsLoading(false);
-                setIsValidating(false);
+                if (isCurrent()) {
+                    setIsLoading(false);
+                    setIsValidating(false);
+                }
             }
         },
-        // options intentionally excluded — captured by ref-free getOrSet usage
         [engine, key]
     );
 
     useEffect(() => {
-        if (!enabled) { setIsLoading(false); return; }
+        // A different key must never show the previous key's data.
+        setData(undefined);
+        setError(null);
+        if (!enabled) {
+            requestRef.current++; // invalidate in-flight requests
+            setIsLoading(false);
+            setIsValidating(false);
+            return;
+        }
+        setIsLoading(true);
         void load();
+        return () => {
+            requestRef.current++; // ignore results after unmount / key change
+        };
     }, [enabled, load]);
 
     // Revalidate on focus.
+    const revalidateOnFocus = options?.revalidateOnFocus ?? false;
     useEffect(() => {
-        if (!options?.revalidateOnFocus || isSSR() || !enabled) return;
-        const handler = () => void load();
+        if (!revalidateOnFocus || isSSR() || !enabled) return;
+        const handler = (): void => void load();
         window.addEventListener("focus", handler);
         return () => window.removeEventListener("focus", handler);
-    }, [options?.revalidateOnFocus, enabled, load]);
+    }, [revalidateOnFocus, enabled, load]);
 
     const refresh = useCallback(() => load(true), [load]);
 
@@ -147,7 +193,7 @@ export function useCache<T>(
         async (value: T) => {
             if (!engine || key === null) return;
             setData(value);
-            await engine.set(key, value, options);
+            await engine.set(key, value, toCacheOptions(optionsRef.current) as CacheSetOptions);
         },
         [engine, key]
     );
@@ -164,27 +210,34 @@ export function useCacheValue<T>(
     key: string | null,
     options?: { config?: CacheConfig; engine?: CacheEngine | null }
 ): T | undefined {
-    const engine = options?.engine ?? useCacheEngine(options?.config);
+    const engine = useCacheEngine(options?.config, options?.engine);
     const [snapshot, setSnapshot] = useState<T | undefined>(undefined);
 
     useEffect(() => {
+        setSnapshot(undefined);
         if (!engine || key === null) return;
         let active = true;
 
-        const read = () => {
-            engine.get<T>(key).then((v) => { if (active) setSnapshot(v ?? undefined); }).catch(() => undefined);
+        const read = (): void => {
+            // Observing must not count as a use: skip the access-time bump.
+            engine
+                .get<T>(key, { updateAccessTime: false })
+                .then((v) => {
+                    if (active) setSnapshot(v ?? undefined);
+                })
+                .catch(() => undefined);
         };
         read();
 
         const relevant: CacheEvent[] = ["set", "delete", "clear", "sync", "expire", "evict"];
-        const listener = (data: { key?: string }) => {
+        const listener = (data: { key?: string }): void => {
             if (data.key === undefined || data.key === key) read();
         };
-        relevant.forEach((e) => engine.on(e, listener));
+        for (const e of relevant) engine.on(e, listener);
 
         return () => {
             active = false;
-            relevant.forEach((e) => engine.off(e, listener));
+            for (const e of relevant) engine.off(e, listener);
         };
     }, [engine, key]);
 
@@ -195,21 +248,41 @@ export function useCacheValue<T>(
 // useCacheStats — live stats snapshot via useSyncExternalStore.
 // ------------------------------
 
-export function useCacheStats(options?: { config?: CacheConfig; engine?: CacheEngine | null }) {
-    const engine = options?.engine ?? useCacheEngine(options?.config);
+export function useCacheStats(options?: {
+    config?: CacheConfig;
+    engine?: CacheEngine | null;
+}): CacheStats | null {
+    const engine = useCacheEngine(options?.config, options?.engine);
+
+    // useSyncExternalStore requires getSnapshot to return a STABLE reference until the
+    // store changes; engine.getStats() builds a fresh object on every call, so cache it.
+    const snapshotRef = useRef<{ engine: CacheEngine; stats: CacheStats } | null>(null);
 
     const subscribe = useCallback(
         (onChange: () => void) => {
             if (!engine) return () => undefined;
             const events: CacheEvent[] = ["set", "get", "delete", "clear", "evict", "hit", "miss"];
-            events.forEach((e) => engine.on(e, onChange));
-            return () => events.forEach((e) => engine.off(e, onChange));
+            const handler = (): void => {
+                snapshotRef.current = { engine, stats: engine.getStats() };
+                onChange();
+            };
+            for (const e of events) engine.on(e, handler);
+            return () => {
+                for (const e of events) engine.off(e, handler);
+            };
         },
         [engine]
     );
 
-    const getSnapshot = useCallback(() => (engine ? engine.getStats() : null), [engine]);
-    const getServerSnapshot = useCallback(() => null, []);
+    const getSnapshot = useCallback((): CacheStats | null => {
+        if (!engine) return null;
+        if (snapshotRef.current?.engine !== engine) {
+            snapshotRef.current = { engine, stats: engine.getStats() };
+        }
+        return snapshotRef.current.stats;
+    }, [engine]);
+
+    const getServerSnapshot = useCallback((): CacheStats | null => null, []);
 
     return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 }

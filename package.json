@@ -1,7 +1,7 @@
 {
   "name": "cache-craft-engine",
-  "version": "0.4.0",
-  "description": "Enterprise-grade IndexedDB caching library \u2014 SSR-safe, Next.js-ready, React-friendly, with an in-memory metadata index, cache-aside getOrSet with stampede protection, tag invalidation, atomic batch writes, plugins, encryption and advanced eviction strategies.",
+  "version": "0.5.0",
+  "description": "Enterprise-grade IndexedDB caching library — SSR-safe, Next.js-ready, React-friendly, with an in-memory metadata index, cache-aside getOrSet with stampede protection, tag invalidation, atomic batch writes, plugins, encryption and advanced eviction strategies.",
   "author": {
     "name": "Mohammad Javad",
     "email": "mjavadsf72@gmail.com",
@@ -15,17 +15,28 @@
   "sideEffects": false,
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs",
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      },
       "default": "./dist/index.js"
     },
     "./react": {
-      "types": "./dist/react.d.ts",
-      "import": "./dist/react.js",
-      "require": "./dist/react.cjs",
+      "import": {
+        "types": "./dist/react.d.ts",
+        "default": "./dist/react.js"
+      },
+      "require": {
+        "types": "./dist/react.d.cts",
+        "default": "./dist/react.cjs"
+      },
       "default": "./dist/react.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
@@ -35,13 +46,16 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "build": "tsc --noEmit && rollup -c",
-    "build:types": "tsc --emitDeclarationOnly",
+    "build": "tsdown",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run build",
-    "test": "jest",
-    "test:watch": "jest --watch",
-    "lint": "eslint src --ext .ts"
+    "lint": "biome lint .",
+    "format": "biome format --write .",
+    "check": "biome check .",
+    "check:fix": "biome check --write .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "verify": "npm run check && npm run typecheck && npm run test && npm run build",
+    "prepublishOnly": "npm run verify"
   },
   "keywords": [
     "cache",
@@ -96,21 +110,16 @@
     }
   ],
   "devDependencies": {
-    "@rollup/plugin-typescript": "^12.3.0",
-    "@types/jest": "^30.0.0",
-    "@typescript-eslint/eslint-plugin": "^8.61.0",
-    "@typescript-eslint/parser": "^8.61.0",
-    "eslint": "^10.5.0",
+    "@biomejs/biome": "2.5.15",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "fake-indexeddb": "^6.2.5",
-    "jest": "^30.4.2",
-    "jest-environment-jsdom": "^30.4.1",
-    "rollup": "^4.62.0",
-    "rollup-plugin-dts": "^6.4.1",
-    "ts-jest": "^29.4.11",
-    "tslib": "^2.8.1",
-    "typescript": "^5.9.3",
-    "@types/react": "^19.2.17",
-    "react": "^19.2.7"
+    "happy-dom": "^20.14.5",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "tsdown": "^0.23.0",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
   },
   "peerDependencies": {
     "react": ">=18.0.0"
@@ -119,5 +128,8 @@
     "react": {
       "optional": true
     }
+  },
+  "engines": {
+    "node": ">=18"
   }
 }

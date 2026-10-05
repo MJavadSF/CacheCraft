@@ -1,122 +1,122 @@
 // ==============================
-// CacheCraft v0.4
+// CacheCraft
 // Browser-first · SSR-safe · Next.js · React · TypeScript · Vanilla JS
 // ==============================
 
+// Admin Panel & Monitor
+export { CacheAdminPanel, CacheMonitor } from "./admin";
 // Core
 export { CacheEngine } from "./cache-engine";
-
+// Eviction Policies
+export {
+    ARCEvictionPolicy, // deprecated alias of SegmentedEvictionPolicy
+    createEvictionPolicy,
+    FIFOEvictionPolicy,
+    LFUEvictionPolicy,
+    LRUEvictionPolicy,
+    PriorityEvictionPolicy,
+    SegmentedEvictionPolicy,
+    SizeBasedEvictionPolicy,
+    TTLEvictionPolicy,
+} from "./eviction";
+// Built-in Plugins
+export {
+    AnalyticsPlugin,
+    CompressionOptimizerPlugin,
+    DebugPlugin,
+    LoggerPlugin,
+    MetricsPlugin,
+    PersistencePlugin,
+    PrefetchPlugin,
+    RateLimiterPlugin,
+    TagManagerPlugin,
+    TTLRefreshPlugin,
+    ValidationPlugin,
+    WarmupPlugin,
+} from "./plugins";
 // Types
 export type {
-    CacheKey,
+    AdminPanelData,
+    BatchGetItem,
+    BatchResult,
+    BatchSetItem,
+    CacheConfig,
     CacheEntry,
     CacheEntryMeta,
-    CacheSetOptions,
-    CacheGetOptions,
-    GetOrSetOptions,
-    CacheConfig,
-    CachePlugin,
+    CacheEntryWithKey,
     CacheEvent,
     CacheEventData,
     CacheEventListener,
+    CacheGetOptions,
+    CacheKey,
+    CachePlugin,
+    CachePluginHost,
+    CacheQuery,
+    CacheSetOptions,
+    CacheSortField,
     CacheStats,
     DetailedStats,
-    CacheQuery,
-    CacheSortField,
-    QueryResult,
-    BatchSetItem,
-    BatchGetItem,
-    BatchResult,
-    ExportOptions,
-    ImportOptions,
-    ExportData,
-    EvictionStrategy,
     EvictionPolicy,
-    CacheEntryWithKey,
-    SyncMessage,
-    SyncMessageType,
-    StorageInfo,
+    EvictionStrategy,
+    ExportData,
+    ExportOptions,
+    GetOrSetOptions,
     HealthStatus,
-    AdminPanelData,
-    SerializableCacheEntry,
+    ImportOptions,
+    MetricData,
     MigrationConfig,
     MonitorConfig,
-    MetricData,
+    QueryResult,
+    SerializableCacheEntry,
+    StorageInfo,
+    SyncConfig,
+    SyncMessage,
+    SyncMessageType,
 } from "./types";
 export { toCacheKey } from "./types";
-
 // Utilities
 export {
-    isClient,
-    isSSR,
-    isBroadcastChannelSupported,
-    isWebCryptoAvailable,
-    isSafari,
-    compress,
-    decompress,
-    encode,
-    decode,
-    EncryptionManager,
-    getSize,
     buildKey,
-    parseKey,
-    matchesPattern,
-    isExpired,
+    CacheError,
     calculateTTL,
-    getAge,
-    getTimeUntilExpiry,
+    compress,
+    debounce,
+    decode,
+    decompress,
+    deepClone,
+    EncryptionError,
+    EncryptionManager,
+    encode,
     formatBytes,
     formatDuration,
     formatPercentage,
-    CacheError,
-    QuotaExceededError,
-    EncryptionError,
-    UnsupportedEnvironmentError,
-    PerformanceTimer,
-    debounce,
-    throttle,
-    deepClone,
     generateId,
+    getAge,
+    getSize,
+    getTimeUntilExpiry,
+    isBroadcastChannelSupported,
+    isClient,
+    isExpired,
+    isGzip,
+    isSafari,
+    isSSR,
+    isWebCryptoAvailable,
+    matchesPattern,
+    PerformanceTimer,
+    parseKey,
+    QuotaExceededError,
+    throttle,
+    toError,
+    UnsupportedEnvironmentError,
+    VERSION,
 } from "./utils";
-
-// Eviction Policies
-export {
-    LRUEvictionPolicy,
-    LFUEvictionPolicy,
-    FIFOEvictionPolicy,
-    PriorityEvictionPolicy,
-    SegmentedEvictionPolicy,
-    ARCEvictionPolicy, // deprecated alias of SegmentedEvictionPolicy
-    TTLEvictionPolicy,
-    SizeBasedEvictionPolicy,
-    createEvictionPolicy,
-} from "./eviction";
-
-// Admin Panel & Monitor
-export { CacheAdminPanel, CacheMonitor } from "./admin";
-
-// Built-in Plugins
-export {
-    LoggerPlugin,
-    MetricsPlugin,
-    ValidationPlugin,
-    TTLRefreshPlugin,
-    CompressionOptimizerPlugin,
-    TagManagerPlugin,
-    RateLimiterPlugin,
-    PrefetchPlugin,
-    WarmupPlugin,
-    PersistencePlugin,
-    AnalyticsPlugin,
-    DebugPlugin,
-} from "./plugins";
 
 // ==============================
 // Factory Helpers
 // ==============================
 
-import type { CacheConfig } from "./types";
 import { CacheEngine } from "./cache-engine";
+import type { CacheConfig } from "./types";
 import { isSSR } from "./utils";
 
 /**

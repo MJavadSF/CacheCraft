@@ -1,5 +1,40 @@
 # Migration Guide
 
+## v0.4 → v0.5
+
+The public API is unchanged (only additions), but several behaviours that were **bugs** now behave
+correctly. Things you might notice:
+
+- **`encrypt: true` now requires `encryptionKey`.** Previously it silently stored plaintext when no key was
+  configured; now `set()` throws `EncryptionError`. Reading an encrypted entry on an engine without a key throws.
+- **Namespaces are isolated.** `cache.namespace("x").clear()` only clears `x:*`. A namespaced engine only counts,
+  lists and evicts its own keys. (An engine *without* a namespace still sees every key in the database, as before.)
+- **`query({ pattern })` matches the key without the namespace** — same as `keys(pattern)`.
+- **`compressionRatio`** (in `getDetailedStats()`) is now *stored / original* size of compressed entries
+  (0–1, lower is better). `0` when nothing is compressed.
+- **`set(key, undefined)` throws** (`CacheError`, code `INVALID_VALUE`) instead of storing an unreadable entry.
+- **`getOrSet` no longer throws if the *write* fails** — the computed value is returned and the failure goes to
+  `onError`. A cached `null` is now a hit.
+- **Plugin / event keys from eviction are namespace-free**, like every other key you receive.
+- **`TTLRefreshPlugin`, `PrefetchPlugin`, `CompressionOptimizerPlugin` now actually work** — if you registered them
+  before, expect their documented behaviour to kick in. `PrefetchPlugin` loaders may now return the related values
+  (`{ [key]: value }` — only the rule's own keys are stored — or an array aligned with them); loaders that return nothing
+  and call `cache.set` themselves still work.
+- `CacheSyncMessage.value` is no longer sent between tabs (receivers re-read IndexedDB).
+
+### Tooling changes (contributors)
+
+| Before                         | Now                               |
+|--------------------------------|-----------------------------------|
+| TypeScript 5.9                 | **TypeScript 7**                  |
+| ESLint + typescript-eslint     | **Biome 2** (`npm run check`)     |
+| Jest + ts-jest                 | **Vitest 5**                      |
+| Rollup + rollup-plugin-dts     | **tsdown**                        |
+
+`npm run lint` → `npm run check`; `npm test` still works. Install with `npm install` (the lockfile was regenerated).
+
+---
+
 ## v0.3 → v0.4
 
 v0.4 is **backward compatible** — existing code keeps working. A few notes:

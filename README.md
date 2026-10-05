@@ -6,7 +6,7 @@
 [![npm downloads](https://img.shields.io/npm/dm/cache-craft-engine.svg?style=for-the-badge)](https://www.npmjs.com/package/cache-craft-engine)
 [![GitHub stars](https://img.shields.io/github/stars/MJavadSF/CacheCraft?style=for-the-badge)](https://github.com/MJavadSF/CacheCraft)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue.svg?style=for-the-badge)](https://www.typescriptlang.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-7.0-blue.svg?style=for-the-badge)](https://www.typescriptlang.org/)
 
 **Enterprise-grade IndexedDB caching library — SSR-safe, Next.js-ready, React-friendly**
 
@@ -16,7 +16,48 @@
 
 ---
 
-## 🆕 What's New in v0.4
+## 🆕 What's New in v0.5
+
+v0.5 is a **correctness + tooling** release: a deep bug-fix pass over the engine, plugins
+and React hooks, plus a much faster toolchain (TypeScript 7, Biome, Vitest, tsdown).
+
+**Fixed (highlights)** — full list in [CHANGELOG.md](./CHANGELOG.md):
+
+- 🔐 `encrypt: true` could silently store **plaintext** (key not derived yet, or no
+  `encryptionKey`). It now waits for the key and throws `EncryptionError` instead.
+- 🗂️ `namespace(ns).clear()` wiped the **whole** object store, and namespaced engines indexed,
+  budgeted and evicted other namespaces' keys. Namespaces are now fully isolated.
+- 🔁 Cross-tab sync: a `delete`/`clear` in one namespace deleted the same key in *other*
+  namespaces; values were broadcast (and non-cloneable values broke `set()`). Fixed.
+- 🧲 `getOrSet`: a cached `null` was treated as a miss; background SWR refreshes weren't
+  de-duplicated; a refreshed entry lost its TTL and tags.
+- 🗜️ `compress()` could **deadlock** on large/incompressible payloads (several MB).
+- ⚛️ `useCacheStats` crashed React ("getSnapshot should be cached"); `useCache` called a hook
+  conditionally and let `refresh()` drop the cached value when the factory failed.
+- 🧩 Plugins: `TTLRefreshPlugin`, `CompressionOptimizerPlugin` and `PrefetchPlugin` did nothing;
+  `TagManagerPlugin` kept stale tags; `batchSet` skipped plugin hooks.
+- 📊 `compressionRatio` was not a ratio; `avgAccessTime` was not an average; the admin panel
+  warned about a "low hit rate" on a brand-new cache; `getStorageInfo()` triggered a
+  persistent-storage permission prompt.
+
+**New**
+
+- `cache.ready()` — await index hydration.
+- `cache.queryMeta(query)` — like `query()` but metadata-only (no payload reads/decoding).
+- `CachePlugin.init(host)` — plugins can use the cache (`set`/`has`) they are attached to.
+- `CacheAdminPanel.dispose()` and `CacheMonitor.measure()`.
+- `VERSION` export; `QuotaExceededError` is now actually thrown on quota failures.
+
+**Tooling** — TypeScript **7**, **Biome** (lint + format, replaces ESLint), **Vitest** (replaces
+Jest/ts-jest, which cannot run on TS 7), **tsdown** (replaces Rollup + plugins; one shared
+chunk for both entry points). See [Development](#-development).
+
+> **Backwards compatible API.** A few behaviours changed because they were bugs — see
+> [MIGRATION.md](./MIGRATION.md#v04--v05).
+
+---
+
+## v0.4 highlights
 
 v0.4 is a major **performance and ergonomics** release. The engine now keeps an
 in-memory metadata index so the hot paths never scan IndexedDB or deserialize
@@ -232,7 +273,7 @@ export async function getServerSideProps() {
 
 ### Official React hooks (`cache-craft-engine/react`)
 
-v0.4 ships first-class, SSR-safe hooks. They share one engine per `dbName`
+Official, SSR-safe hooks ship in the box. They share one engine per `dbName`
 (so multiple components reading the same key hit the same in-memory cache).
 
 ```tsx
@@ -511,8 +552,8 @@ const cache = createCache({
     encryptionKey: '',                // AES-GCM passphrase ('' = disabled)
     autoCleanup: true,              // Remove expired entries periodically
     cleanupInterval: 60_000,            // 1 minute
-    persistAccessMetadata: true,           // Buffer & flush access-time writes (v0.4)
-    accessMetadataFlushInterval: 1_000,         // Flush cadence in ms (v0.4)
+    persistAccessMetadata: true,           // Buffer & flush access-time writes
+    accessMetadataFlushInterval: 1_000,         // Flush cadence in ms
     plugins: [],
     onError: (err) => console.error(err),
 });
@@ -535,7 +576,7 @@ const cache = createCache({
 | `get`              | `get<T>(key, options?)`        | Retrieve a value (null if missing/expired) |
 | `getOrSet`         | `getOrSet<T>(key, factory, options?)` | Cache-aside with single-flight stampede protection |
 | `remove`           | `remove(key)`                  | Delete an entry                            |
-| `clear`            | `clear()`                      | Delete all entries, returns count          |
+| `clear`            | `clear()`                      | Delete all entries **of this namespace**, returns count |
 | `has`              | `has(key)`                     | Check if key exists and is not expired     |
 | `keys`             | `keys(pattern?)`               | List all keys, optionally filtered         |
 | `keysByTag`        | `keysByTag(tag)`               | Keys associated with a tag                  |
@@ -544,14 +585,16 @@ const cache = createCache({
 | `allTags`          | `allTags()`                    | All tags currently in use                   |
 | `size`             | `size()`                       | Total storage used (bytes) — O(1)          |
 | `count`            | `count()`                      | Number of entries — O(1)                   |
-| `namespace`        | `namespace(ns)`                | Create namespaced sub-cache                |
+| `namespace`        | `namespace(ns)`                | Create an isolated sub-cache on the same database |
 | `setBlob`          | `setBlob(key, blob, options?)` | Store a Blob                               |
 | `getBlob`          | `getBlob(key, type?)`          | Retrieve a Blob                            |
 | `batchSet`         | `batchSet(items)`              | Atomic bulk set (single transaction)       |
 | `getMany`          | `getMany(keys)`                | Read many keys in one transaction → Map     |
 | `batchGet`         | `batchGet(items)`              | Bulk get (per-key results)                 |
 | `batchDelete`      | `batchDelete(keys)`            | Atomic bulk delete (single transaction)    |
-| `query`            | `query(query)`                 | Filter/sort entries                        |
+| `query`            | `query(query)`                 | Filter/sort entries (with values)          |
+| `queryMeta`        | `queryMeta(query?)`            | Same filters, metadata only (no payload reads) |
+| `ready`            | `ready()`                      | Resolves once the in-memory index is loaded |
 | `getStats`         | `getStats()`                   | Snapshot of cache statistics               |
 | `getDetailedStats` | `getDetailedStats()`           | Full stats including per-tag data          |
 | `resetStats`       | `resetStats()`                 | Reset all counters                         |
@@ -585,9 +628,25 @@ const cache = createCache({
 
 ---
 
+## 🛠️ Development
+
+```bash
+npm install
+npm run check      # Biome: lint + format + import order
+npm run check:fix  # ...and apply fixes
+npm run typecheck  # TypeScript 7 (tsc --noEmit)
+npm test           # Vitest (happy-dom + fake-indexeddb)
+npm run build      # tsdown → dist/ (ESM + CJS + .d.ts/.d.cts)
+npm run verify     # everything above, in order (also runs on prepublishOnly)
+```
+
+Requires Node ≥ 22.18 for development (the published package runs anywhere modern).
+
+---
+
 ## 📚 Migration Guide
 
-See [MIGRATION.md](./MIGRATION.md) for upgrading from v0.1 / v0.2.
+See [MIGRATION.md](./MIGRATION.md) for upgrading from v0.1 – v0.4.
 
 ---
 

@@ -1,5 +1,5 @@
 // ==============================
-// CacheCraft Types — v0.4
+// CacheCraft Types
 // Browser + SSR + Next.js + React compatible
 // ==============================
 
@@ -18,7 +18,10 @@ export type CacheEntry<T = unknown> = {
     createdAt: number;
     lastAccessed: number;
     expiresAt?: number | undefined;
+    /** Stored size in bytes (after compression / encryption). */
     size: number;
+    /** Uncompressed UTF-8 size in bytes. Only set for compressed entries. */
+    originalSize?: number | undefined;
     isEncrypted?: boolean | undefined;
     accessCount?: number | undefined;
     tags?: readonly string[] | undefined;
@@ -58,6 +61,7 @@ export type CacheGetOptions<T> = {
     onGet?: (key: string, value: T | null) => void;
 };
 
+// biome-ignore lint/correctness/noUnusedVariables: `T` ties the options to the factory's value type at call sites
 export type GetOrSetOptions<T> = CacheSetOptions & {
     /**
      * Serve a stale (expired) value immediately and refresh in the
@@ -127,11 +131,7 @@ export type EvictionStrategy =
 
 export interface EvictionPolicy {
     name: string;
-    shouldEvict(
-        entries: CacheEntryMeta[],
-        maxSize: number,
-        currentSize: number
-    ): string[];
+    shouldEvict(entries: CacheEntryMeta[], maxSize: number, currentSize: number): string[];
 }
 
 /**
@@ -148,6 +148,8 @@ export type CacheEntryMeta = {
     expiresAt?: number | undefined;
     priority?: number | undefined;
     tags?: readonly string[] | undefined;
+    /** Uncompressed UTF-8 size in bytes. Only set for compressed entries. */
+    originalSize?: number | undefined;
     isCompressed: boolean;
     isEncrypted: boolean;
     isEncoded: boolean;
@@ -162,9 +164,17 @@ export type CacheEntryWithKey = {
 // Plugin System
 // ==============================
 
+/** The slice of the engine that plugins may use (passed to {@link CachePlugin.init}). */
+export interface CachePluginHost {
+    set(key: string, value: unknown, options?: CacheSetOptions): Promise<void>;
+    has(key: string): Promise<boolean>;
+}
+
 export interface CachePlugin {
     name: string;
     version?: string;
+    /** Called once when the plugin is registered (config `plugins` or `cache.use()`). */
+    init?: (host: CachePluginHost) => void;
     beforeSet?: (
         key: string,
         value: unknown,
@@ -176,10 +186,12 @@ export interface CachePlugin {
         entry: CacheEntry,
         options?: CacheSetOptions
     ) => Promise<void> | void;
-    beforeGet?: (
-        key: string,
-        options?: CacheGetOptions<unknown>
-    ) => Promise<boolean> | boolean;
+    beforeGet?: (key: string, options?: CacheGetOptions<unknown>) => Promise<boolean> | boolean;
+    /**
+     * Called after a lookup. `entry` is `null` on a miss. A plugin may assign a
+     * new `entry.expiresAt` here to extend (or shorten) the entry's lifetime —
+     * the engine applies and persists the change.
+     */
     afterGet?: (
         key: string,
         value: unknown,
@@ -248,6 +260,10 @@ export type CacheStats = {
 export type DetailedStats = CacheStats & {
     entriesByTag: Record<string, number>;
     sizeByTag: Record<string, number>;
+    /**
+     * Stored size / original size across compressed entries (0-1; lower is
+     * better). `0` when no entry is compressed.
+     */
     compressionRatio: number;
     encryptedCount: number;
     expiredCount: number;
@@ -355,7 +371,12 @@ export type SyncMessageType = "set" | "delete" | "clear" | "evict";
 export type SyncMessage = {
     type: SyncMessageType;
     key?: string;
+    /** Affected keys of an `evict` message. */
+    keys?: string[];
+    /** @deprecated No longer sent — values are never broadcast between tabs. */
     value?: unknown;
+    /** Namespace of the sending engine; engines ignore other namespaces. */
+    namespace?: string;
     timestamp: number;
     source: string;
 };
