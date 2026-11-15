@@ -16,5 +16,5 @@
     "verbatimModuleSyntax": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src", "tests", "examples.ts"]
+  "include": ["src", "tests", "examples", "bench"]
 }

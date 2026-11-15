@@ -6,7 +6,7 @@ import {
     MetricsPlugin,
     TagManagerPlugin,
     ValidationPlugin,
-} from "./src";
+} from "../src";
 
 // ==============================
 // Example 1: Basic Usage
@@ -279,12 +279,9 @@ async function exportImportExample() {
     await cache1.set("key2", "value2");
 
     // Export
-    const exported = await cache1.export({
-        includeExpired: false,
-        compress: false,
-    });
+    const exported = await cache1.export({ includeExpired: false });
 
-    console.log("Exported entries:", Object.keys(exported.entries).length);
+    console.log("Exported entries:", exported.entries.length);
 
     // Import to another cache
     const cache2 = new CacheEngine({ dbName: "cache2" });

@@ -1,306 +1,90 @@
-# 🚀 Quick Start Guide - CacheCraft v0.2
+# 🚀 Quick Start — CacheCraft 1.0
 
-Get started with CacheCraft in 5 minutes!
-
-## Installation
+## 1. Install
 
 ```bash
-npm install cachecraft
+npm install cache-craft-engine
 ```
 
-## Basic Usage (30 seconds)
+## 2. Create one cache per app
 
-```typescript
-import { CacheEngine } from 'cachecraft';
+```ts
+// cache.ts
+import { createClientCache } from "cache-craft-engine";
 
-// Create cache
-const cache = new CacheEngine();
-
-// Set data
-await cache.set('user', { id: 1, name: 'John' });
-
-// Get data
-const user = await cache.get('user');
-console.log(user); // { id: 1, name: 'John' }
+export const cache = createClientCache({
+    dbName: "my-app",
+    maxSize: "50MB",
+    defaultTTL: "1h",
+    memoryCache: true, // fast repeated reads
+}); // null during SSR
 ```
 
-That's it! You're caching! 🎉
+## 3. Cache API calls with `getOrSet`
 
-## Common Patterns
+```ts
+const products = await cache!.getOrSet(
+    "products",
+    ({ signal }) => fetch("/api/products", { signal }).then((r) => r.json()),
+    { ttl: "5m", staleWhileRevalidate: true, retry: 2, timeout: "8s", tags: ["catalog"] }
+);
 
-### 1. API Response Caching (2 minutes)
-
-```typescript
-import { CacheEngine } from 'cachecraft';
-
-const apiCache = new CacheEngine({ namespace: 'api' });
-
-async function fetchUser(id: number) {
-    // Check cache
-    const cached = await apiCache.get(`user-${id}`);
-    if (cached) return cached;
-    
-    // Fetch from API
-    const user = await fetch(`/api/users/${id}`).then(r => r.json());
-    
-    // Cache for 5 minutes
-    await apiCache.set(`user-${id}`, user, { ttl: 5 * 60 * 1000 });
-    
-    return user;
-}
+// after a mutation:
+await cache!.invalidateByTag("catalog");
 ```
 
-### 2. Image Caching (2 minutes)
+## 4. Use it from your framework
 
-```typescript
-const imageCache = new CacheEngine({ namespace: 'images' });
+```tsx
+// React / Next.js (client components)
+import { CacheProvider, useCache } from "cache-craft-engine/react";
 
-async function cacheImage(url: string) {
-    // Check cache
-    const cached = await imageCache.getBlob(url);
-    if (cached) return URL.createObjectURL(cached);
-    
-    // Fetch image
-    const response = await fetch(url);
-    const blob = await response.blob();
-    
-    // Cache for 24 hours
-    await imageCache.setBlob(url, blob, { ttl: 24 * 60 * 60 * 1000 });
-    
-    return URL.createObjectURL(blob);
-}
+<CacheProvider config={{ dbName: "my-app", memoryCache: true }}>…</CacheProvider>;
+
+const { data, error, isLoading, mutate } = useCache(`user:${id}`, () => api.user(id), { ttl: "5m" });
 ```
 
-### 3. Stale-While-Revalidate (Advanced)
+```ts
+// Vue
+import { useCache } from "cache-craft-engine/vue";
+const { data } = useCache(() => `user:${props.id}`, () => api.user(props.id), { engine: cache });
 
-```typescript
-const data = await cache.get('key', {
-    staleWhileRevalidate: true,
-    revalidate: async () => {
-        // Fetch fresh data in background
-        return await fetchFreshData();
-    },
-    ttlOnRevalidate: 5 * 60 * 1000 // 5 minutes
-});
+// Svelte
+import { cacheStore } from "cache-craft-engine/svelte";
+const user = cacheStore(cache, `user:${id}`, () => api.user(id));
 ```
 
-## Enable Monitoring (1 minute)
+## 5. Open the DevTools while developing
 
-```typescript
-import { CacheEngine, CacheAdminPanel } from 'cachecraft';
-
-const cache = new CacheEngine({ enableStats: true });
-const admin = new CacheAdminPanel(cache);
-
-// Check stats anytime
-const stats = cache.getStats();
-console.log('Hit rate:', stats.hitRate);
-console.log('Total size:', stats.totalSize);
-
-// Generate report
-const report = await admin.generateReport();
-console.log(report);
+```ts
+import { mountDevtools } from "cache-craft-engine/devtools";
+if (import.meta.env.DEV) mountDevtools(); // Alt+Shift+C
 ```
 
-## Add Logging (30 seconds)
+## Cheatsheet
 
-```typescript
-import { CacheEngine, LoggerPlugin } from 'cachecraft';
+| Task | Code |
+|---|---|
+| Read / write | `get(k)`, `set(k, v, { ttl: "10m", tags })` |
+| Read without side effects | `peek(k)` |
+| Value + age/TTL | `getWithMeta(k)` |
+| Extend lifetime | `touch(k, "30m")` |
+| Atomic update | `update(k, (cur) => next)` |
+| Delete | `remove(k)`, `invalidateByTag(t)`, `invalidateByPattern(/^user:/)`, `clear()` |
+| Many at once | `getMany(keys)`, `batchSet(items)`, `batchDelete(keys)` |
+| Encrypt | `createCache({ encryptionKey })` + `set(k, v, { encrypt: true })` |
+| Separate areas | `cache.namespace("users")` |
+| Large files | `setBlob(k, blob)` / `getBlob(k)`, or `storage: "opfs"` |
+| HTTP caching | `cachedFetch(cache, url)` from `cache-craft-engine/fetch` |
+| Stats | `getStats()`, `getDetailedStats()`, `getHealth()` |
 
-const cache = new CacheEngine({
-    plugins: [new LoggerPlugin()]
-});
+## Common questions
 
-// All operations are now logged!
-await cache.set('key', 'value'); // Logs: [CACHE] Set: key (5 bytes)
-```
+- **"IndexedDB is not available"** — you're on the server. Create caches on the client
+  (`createClientCache`, `getSharedCache`, `<CacheProvider>`), or use `storage: "memory"` explicitly.
+- **Another tab's data isn't showing** — it is, as of 1.0 (sync + read-through). If you disabled
+  `enableSync`, call `cache.refresh()` to reload `keys()`/`count()`.
+- **Cache is full** — raise `maxSize`/`maxEntries`, add `tagQuotas`, or pick another `evictionStrategy`.
+- **Upgrading from 0.x** — nothing to do for your data; read [MIGRATION.md](./MIGRATION.md).
 
-## Use Different Eviction (30 seconds)
-
-```typescript
-// Keep frequently used items
-const cache = new CacheEngine({
-    evictionStrategy: 'lfu' // or 'lru', 'fifo', 'priority'
-});
-```
-
-## Organize with Tags (1 minute)
-
-```typescript
-// Set with tags
-await cache.set('user-1', userData, {
-    tags: ['users', 'active'],
-    priority: 10
-});
-
-// Query by tags
-const activeUsers = await cache.query({
-    tags: ['active']
-});
-```
-
-## Batch Operations (1 minute)
-
-```typescript
-// Set multiple items at once (faster!)
-await cache.batchSet([
-    { key: 'user-1', value: user1 },
-    { key: 'user-2', value: user2 },
-    { key: 'user-3', value: user3 }
-]);
-
-// Get multiple items at once
-const results = await cache.batchGet([
-    { key: 'user-1' },
-    { key: 'user-2' },
-    { key: 'user-3' }
-]);
-```
-
-## React Hook Example
-
-```typescript
-import { useEffect, useState } from 'react';
-import { CacheEngine } from 'cachecraft';
-
-const cache = new CacheEngine();
-
-function useCache<T>(key: string, fetcher: () => Promise<T>) {
-    const [data, setData] = useState<T | null>(null);
-    const [loading, setLoading] = useState(true);
-
-    useEffect(() => {
-        async function load() {
-            // Check cache
-            let result = await cache.get<T>(key);
-            
-            if (!result) {
-                // Fetch and cache
-                result = await fetcher();
-                await cache.set(key, result, { ttl: 5 * 60 * 1000 });
-            }
-            
-            setData(result);
-            setLoading(false);
-        }
-        
-        load();
-    }, [key]);
-
-    return { data, loading };
-}
-
-// Usage
-function UserProfile({ userId }: { userId: number }) {
-    const { data: user, loading } = useCache(
-        `user-${userId}`,
-        () => fetch(`/api/users/${userId}`).then(r => r.json())
-    );
-
-    if (loading) return <div>Loading...</div>;
-    return <div>{user?.name}</div>;
-}
-```
-
-## Configuration Options
-
-```typescript
-const cache = new CacheEngine({
-    dbName: 'my-cache',              // Database name
-    maxSize: 100 * 1024 * 1024,      // 100MB max
-    compressionThreshold: 10 * 1024,  // Compress > 10KB
-    namespace: 'app',                 // Namespace for isolation
-    evictionStrategy: 'lru',          // LRU, LFU, FIFO, Priority
-    enableStats: true,                // Track statistics
-    enableSync: true,                 // Sync across tabs
-    autoCleanup: true,                // Auto-remove expired
-    cleanupInterval: 60000,           // Every 60 seconds
-});
-```
-
-## Common Operations Cheatsheet
-
-```typescript
-// Basic operations
-await cache.set(key, value);
-const data = await cache.get(key);
-await cache.remove(key);
-await cache.clear();
-
-// With options
-await cache.set(key, value, {
-    ttl: 60000,        // Expire after 60 seconds
-    compress: true,    // Compress data
-    encrypt: true,     // Encrypt data
-    tags: ['tag1'],    // Add tags
-    priority: 10       // Set priority
-});
-
-// Check existence
-const exists = await cache.has(key);
-
-// Get info
-const size = await cache.size();      // Total size in bytes
-const count = await cache.count();    // Number of entries
-const keys = await cache.keys();      // All keys
-
-// Statistics
-const stats = cache.getStats();
-console.log(stats.hitRate);           // Hit rate %
-console.log(stats.totalSize);         // Total size
-
-// Namespaces
-const userCache = cache.namespace('users');
-const productCache = cache.namespace('products');
-
-// Events
-cache.on('hit', (data) => console.log('Hit:', data.key));
-cache.on('miss', (data) => console.log('Miss:', data.key));
-```
-
-## Next Steps
-
-1. 📖 Read the [Full Documentation](./README.md)
-2. 💡 Check out [More Examples](./examples.ts)
-3. 🔄 See [Migration Guide](./MIGRATION.md) if coming from v1
-4. 📊 Explore the Admin Panel features
-5. 🔌 Create custom plugins
-
-## Tips
-
-1. **Use namespaces** to organize different types of data
-2. **Enable stats** to monitor cache performance
-3. **Set appropriate TTL** to balance freshness and performance
-4. **Use batch operations** when working with multiple items
-5. **Add tags** to make queries easier
-6. **Try different eviction strategies** to find what works best
-
-## Common Issues
-
-### Q: My data isn't persisting
-**A:** IndexedDB is browser storage - it persists across page reloads but can be cleared by user
-
-### Q: Cache is full
-**A:** Increase `maxSize` or use a more aggressive eviction strategy
-
-### Q: Slow performance
-**A:** Enable compression for large data, use batch operations, check eviction strategy
-
-### Q: How to debug?
-**A:** Use `DebugPlugin` for detailed logging:
-```typescript
-import { DebugPlugin } from 'cachecraft';
-cache.use(new DebugPlugin(true)); // Verbose mode
-```
-
-## Support
-
-- 🐛 [Report Issues](https://github.com/MJavadSF/CacheCraft/issues)
-- 💬 [Discussions](https://github.com/MJavadSF/CacheCraft/discussions)
-- 📧 Email: [your-email]
-
-## That's It!
-
-You're now ready to build with CacheCraft! 🚀
-
-Start simple, add features as you need them. Happy caching!
+More in the [README](./README.md).

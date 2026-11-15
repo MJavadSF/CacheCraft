@@ -1,5 +1,89 @@
 # Migration Guide
 
+## v0.5 → v1.0
+
+1.0 is a drop-in upgrade for most apps: **existing data is migrated automatically** and the
+everyday API (`get`, `set`, `getOrSet`, `remove`, tags, plugins, React hooks) is unchanged.
+Read this list once; most items only matter if you relied on a bug.
+
+### Data & storage
+
+- **New storage layout.** Records live under `[namespace, key]` with metadata in a separate
+  object store (`<store>::data`, `<store>::meta`, `__cachecraft__`). Data written by ≤0.5 is moved
+  into the new layout the first time each key is read (`legacy: "migrate"`, the default). To move it
+  all at once, call `migrateLegacy()` on each namespaced engine first, then on the root engine. When
+  you no longer need old data: `dropLegacyData()`. `legacy: "ignore"` leaves old data untouched.
+- **The `version` option is ignored.** Object stores are created automatically (the database version
+  is bumped when needed), so several `storeName`s can share one database.
+- **Tabs still running 0.x code** after you deploy 1.0 will get a `VersionError` when they reopen the
+  database (the version was bumped). They recover on reload. Consider prompting long-lived tabs to
+  reload after a deploy.
+
+### Behaviour changes (bug fixes)
+
+- **The root engine is a namespace too.** An engine without `namespace` no longer counts, lists,
+  evicts or clears the keys of namespaced engines — `root.clear()` only clears root keys.
+- **Namespaces can't overlap.** `"a"` no longer sees `"a:b"`'s keys.
+- **Reads check storage before missing** (`readThrough: true`), so values written by other tabs or
+  engines are visible even without sync, and an entry refreshed by another tab is no longer deleted
+  as "expired".
+- **`enableSync` is now `true` by default.**
+- **`remove()` and `clear()` throw on storage failures** (they used to return `false` / `0`).
+  `remove()` still returns `false` when the key didn't exist or a plugin vetoed it.
+- **Operations after `destroy()` throw** `CacheError` with code `DESTROYED`.
+- **A TTL of `0` means "already expired"** (`expiresAt` is now inclusive).
+- **Eviction frees down to `evictionTarget`** (default 90 % of the budget) instead of just under
+  it — fewer back-to-back evictions. Set `evictionTarget: 1` for the old behaviour.
+- **`getOrSet` factories receive a context** `{ key, signal, attempt, stale }`. Zero-argument
+  factories keep working.
+- **Plugins in `namespace()`**: plugin *instances* are shared and initialised once (they no longer
+  get `init()` again with the child engine — that rebound `PrefetchPlugin` to the wrong namespace).
+  Pass a factory (`() => new MyPlugin()`) to get one instance per engine.
+- **`PersistencePlugin`** never mirrors encrypted entries or blobs, batches writes, stores each
+  namespace under `<storageKey>::<namespace>` and uses the rich serializer.
+- **React `useCache`**: hooks on the same key now stay in sync (including across tabs), and
+  `invalidate()` makes mounted hooks refetch instead of just clearing their data.
+
+### Values & encryption
+
+- **Values use the `"rich"` serializer** (`Date`, `Map`, `Set`, `BigInt`… survive). Plain JSON data
+  serializes identically, and old entries are read as JSON. Set `serializer: "json"` to keep plain
+  JSON semantics (e.g. if you relied on `Date` → string).
+- **New encryption parameters:** PBKDF2 with **600 000** iterations and a **random salt per
+  database** (≤0.5 used a fixed salt and 100 000). Old encrypted entries stay readable with the same
+  passphrase; `rotateKey()` re-encrypts them with the new parameters. If the first `set` with
+  encryption feels slow on low-end devices, lower `kdfIterations` consciously.
+- **`encode: true` is deprecated** — it's Base64 obfuscation, not security. It still works.
+
+### API changes
+
+| 0.5 | 1.0 |
+|---|---|
+| `ExportData.entries` was a `Record<key, CacheEntry>` | `ExportData` is `{ format: "cachecraft", formatVersion: 2, entries: ExportedEntry[], salt?, … }` (JSON-safe). `import()` accepts both shapes. |
+| `ExportOptions.format` / `compress` | removed (exports are always JSON-safe); new `decrypt` |
+| `CacheEntryMeta.key` was namespace-prefixed in custom eviction policies | keys are namespace-free everywhere |
+| `StorageInfo.canGrow` | still there; prefer `persisted` |
+| `SyncMessage.value`, `SyncConfig`, `MigrationConfig`, `CacheKey` / `toCacheKey`, `SerializableCacheEntry` | removed (unused) |
+| `on()` / `once()` returned `void` | they return an unsubscribe function |
+| `isClient()` required `CompressionStream` | only requires `window` + IndexedDB |
+| `buildKey` / `parseKey` | deprecated (namespaces are no longer string prefixes) |
+
+New (opt-in): `storage`, `maxEntries`, `tagQuotas`, `evictionTarget`, `defaultTTL`, `ttlJitter`,
+`compression`, `serializer(s)`, `decryptionKeys`, `kdfIterations`, `schemaVersion`/`migrate`,
+`memoryCache`, `crossTab`, `readThrough`, `quotaRecovery`, `legacy`, `devtools`, `label`; methods
+`peek`, `getWithMeta`, `touch`, `update`, `invalidateByPattern`, `exportJSON/Blob`,
+`importJSON/Blob`, `rotateKey`, `migrateLegacy`, `dropLegacyData`, `refresh`,
+`requestPersistence`, `startAutoCleanup`; entry points `/vue`, `/svelte`, `/tanstack-query`,
+`/fetch`, `/opentelemetry`, `/devtools`, `/plugins`, `/admin`.
+
+### Tooling (contributors)
+
+- Node ≥ 20 (`engines`), Vitest browser mode (Playwright) for real-browser tests, coverage
+  thresholds, publint / are-the-types-wrong, size-limit, GitHub Actions CI and tag-based releases
+  with npm provenance.
+
+---
+
 ## v0.4 → v0.5
 
 The public API is unchanged (only additions), but several behaviours that were **bugs** now behave

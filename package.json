@@ -1,7 +1,7 @@
 {
   "name": "cache-craft-engine",
-  "version": "0.5.0",
-  "description": "Enterprise-grade IndexedDB caching library — SSR-safe, Next.js-ready, React-friendly, with an in-memory metadata index, cache-aside getOrSet with stampede protection, tag invalidation, atomic batch writes, plugins, encryption and advanced eviction strategies.",
+  "version": "1.0.0",
+  "description": "Production-grade browser cache on IndexedDB/OPFS — isolated namespaces, cross-tab coherence, getOrSet with single-flight/SWR/retries, AES-GCM encryption with key rotation, rich serialization, memory tier, tag invalidation, budgets, devtools panel, and React/Vue/Svelte/TanStack Query/fetch integrations.",
   "author": {
     "name": "Mohammad Javad",
     "email": "mjavadsf72@gmail.com",
@@ -36,6 +36,94 @@
       },
       "default": "./dist/react.js"
     },
+    "./vue": {
+      "import": {
+        "types": "./dist/vue.d.ts",
+        "default": "./dist/vue.js"
+      },
+      "require": {
+        "types": "./dist/vue.d.cts",
+        "default": "./dist/vue.cjs"
+      },
+      "default": "./dist/vue.js"
+    },
+    "./svelte": {
+      "import": {
+        "types": "./dist/svelte.d.ts",
+        "default": "./dist/svelte.js"
+      },
+      "require": {
+        "types": "./dist/svelte.d.cts",
+        "default": "./dist/svelte.cjs"
+      },
+      "default": "./dist/svelte.js"
+    },
+    "./tanstack-query": {
+      "import": {
+        "types": "./dist/tanstack-query.d.ts",
+        "default": "./dist/tanstack-query.js"
+      },
+      "require": {
+        "types": "./dist/tanstack-query.d.cts",
+        "default": "./dist/tanstack-query.cjs"
+      },
+      "default": "./dist/tanstack-query.js"
+    },
+    "./fetch": {
+      "import": {
+        "types": "./dist/fetch.d.ts",
+        "default": "./dist/fetch.js"
+      },
+      "require": {
+        "types": "./dist/fetch.d.cts",
+        "default": "./dist/fetch.cjs"
+      },
+      "default": "./dist/fetch.js"
+    },
+    "./opentelemetry": {
+      "import": {
+        "types": "./dist/opentelemetry.d.ts",
+        "default": "./dist/opentelemetry.js"
+      },
+      "require": {
+        "types": "./dist/opentelemetry.d.cts",
+        "default": "./dist/opentelemetry.cjs"
+      },
+      "default": "./dist/opentelemetry.js"
+    },
+    "./devtools": {
+      "import": {
+        "types": "./dist/devtools.d.ts",
+        "default": "./dist/devtools.js"
+      },
+      "require": {
+        "types": "./dist/devtools.d.cts",
+        "default": "./dist/devtools.cjs"
+      },
+      "default": "./dist/devtools.js"
+    },
+    "./plugins": {
+      "import": {
+        "types": "./dist/plugins.d.ts",
+        "default": "./dist/plugins.js"
+      },
+      "require": {
+        "types": "./dist/plugins.d.cts",
+        "default": "./dist/plugins.cjs"
+      },
+      "default": "./dist/plugins.js"
+    },
+    "./admin": {
+      "import": {
+        "types": "./dist/admin.d.ts",
+        "default": "./dist/admin.js"
+      },
+      "require": {
+        "types": "./dist/admin.d.cts",
+        "default": "./dist/admin.cjs"
+      },
+      "default": "./dist/admin.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -43,7 +131,8 @@
     "src",
     "README.md",
     "LICENSE",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "MIGRATION.md"
   ],
   "scripts": {
     "build": "tsdown",
@@ -54,7 +143,13 @@
     "check:fix": "biome check --write .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "verify": "npm run check && npm run typecheck && npm run test && npm run build",
+    "test:browser": "vitest run --config vitest.browser.config.ts",
+    "test:coverage": "vitest run --coverage",
+    "test:all": "npm run test:coverage && npm run test:browser",
+    "lint:package": "publint --strict && attw --pack . --profile node16",
+    "size": "size-limit",
+    "bench": "node bench/run.mjs",
+    "verify": "npm run check && npm run typecheck && npm run test:all && npm run build && npm run lint:package && npm run size",
     "prepublishOnly": "npm run verify"
   },
   "keywords": [
@@ -83,7 +178,19 @@
     "stampede",
     "single-flight",
     "tag-invalidation",
-    "swr"
+    "swr",
+    "opfs",
+    "origin-private-file-system",
+    "vue",
+    "svelte",
+    "tanstack-query",
+    "devtools",
+    "service-worker",
+    "web-locks",
+    "namespaces",
+    "key-rotation",
+    "standard-schema",
+    "fetch-cache"
   ],
   "repository": {
     "type": "git",
@@ -110,26 +217,47 @@
     }
   ],
   "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
     "@biomejs/biome": "2.5.15",
+    "@size-limit/preset-small-lib": "^14.3.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
+    "@vitest/browser-playwright": "^5.0.3",
+    "@vitest/coverage-v8": "^5.0.3",
+    "dexie": "^4.4.7",
     "fake-indexeddb": "^6.2.5",
+    "fast-check": "^4.10.2",
     "happy-dom": "^20.14.5",
+    "idb-keyval": "^6.3.0",
+    "localforage": "^1.10.0",
+    "playwright": "^1.65.1",
+    "publint": "^0.3.25",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
+    "size-limit": "^14.3.0",
+    "tinybench": "^6.2.3",
     "tsdown": "^0.23.0",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.3"
+    "vitest": "^5.0.3",
+    "vue": "^3.5.45"
   },
   "peerDependencies": {
-    "react": ">=18.0.0"
+    "react": ">=18.0.0",
+    "vue": ">=3.3.0"
   },
   "peerDependenciesMeta": {
     "react": {
       "optional": true
+    },
+    "vue": {
+      "optional": true
     }
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   }
 }

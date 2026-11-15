@@ -1,12 +1,19 @@
 // ==============================
 // CacheCraft
-// Browser-first · SSR-safe · Next.js · React · TypeScript · Vanilla JS
+// Browser-first · Workers · SSR-safe · React · Vue · Svelte · TypeScript
 // ==============================
+
+import { CacheEngine } from "./cache-engine";
+import type { CacheConfig } from "./types";
+import { isSSR } from "./utils";
 
 // Admin Panel & Monitor
 export { CacheAdminPanel, CacheMonitor } from "./admin";
 // Core
 export { CacheEngine } from "./cache-engine";
+export { getRegisteredEngines, onRegistryChange } from "./core/registry";
+// Crypto
+export { DEFAULT_KDF_ITERATIONS, deriveKey, keyFingerprint } from "./crypto";
 // Eviction Policies
 export {
     ARCEvictionPolicy, // deprecated alias of SegmentedEvictionPolicy
@@ -19,6 +26,8 @@ export {
     SizeBasedEvictionPolicy,
     TTLEvictionPolicy,
 } from "./eviction";
+// Locks
+export { isWebLocksSupported, withWebLock } from "./locks";
 // Built-in Plugins
 export {
     AnalyticsPlugin,
@@ -34,6 +43,28 @@ export {
     ValidationPlugin,
     WarmupPlugin,
 } from "./plugins";
+// Serializers
+export { jsonSerializer, richSerializer } from "./serializer";
+// Storage adapters
+export {
+    hasIndexedDB,
+    IndexedDBAdapter,
+    isOPFSSupported,
+    MemoryAdapter,
+    OPFSAdapter,
+    type StorageAdapter,
+    type StorageFactory,
+    type StorageFactoryContext,
+    type StoredMeta,
+    type StoredPayload,
+    type StoredRecord,
+    WebStorageAdapter,
+    type WebStorageLike,
+    type WriteOp,
+    type WriteResult,
+} from "./storage";
+// Typed facade
+export { createTypedCache, type TypedCache } from "./typed";
 // Types
 export type {
     AdminPanelData,
@@ -47,42 +78,64 @@ export type {
     CacheEvent,
     CacheEventData,
     CacheEventListener,
+    CacheFactory,
     CacheGetOptions,
-    CacheKey,
     CachePlugin,
     CachePluginHost,
     CacheQuery,
     CacheSetOptions,
     CacheSortField,
     CacheStats,
+    CompressionAlgorithm,
+    CompressionConfig,
+    CrossTabConfig,
     DetailedStats,
+    Duration,
+    DurationUnit,
+    EngineInfo,
+    EntryInfo,
     EvictionPolicy,
     EvictionStrategy,
     ExportData,
+    ExportedEntry,
+    ExportedPayload,
     ExportOptions,
+    FactoryContext,
     GetOrSetOptions,
     HealthStatus,
     ImportOptions,
+    LatencySummary,
+    LegacyExportData,
+    LegacyMode,
+    MemoryCacheConfig,
     MetricData,
-    MigrationConfig,
     MonitorConfig,
     QueryResult,
-    SerializableCacheEntry,
+    RetryOptions,
+    Serializer,
+    Size,
+    SizeUnit,
+    StandardSchemaResult,
+    StandardSchemaV1,
     StorageInfo,
-    SyncConfig,
+    StorageOption,
     SyncMessage,
     SyncMessageType,
+    TagQuota,
 } from "./types";
-export { toCacheKey } from "./types";
 // Utilities
 export {
+    base64ToBytes,
     buildKey,
+    bytesToBase64,
     CacheError,
     calculateTTL,
     compress,
+    compressBytes,
     debounce,
     decode,
     decompress,
+    decompressBytes,
     deepClone,
     EncryptionError,
     EncryptionManager,
@@ -96,6 +149,7 @@ export {
     getTimeUntilExpiry,
     isBroadcastChannelSupported,
     isClient,
+    isCompressionSupported,
     isExpired,
     isGzip,
     isSafari,
@@ -103,8 +157,12 @@ export {
     isWebCryptoAvailable,
     matchesPattern,
     PerformanceTimer,
+    parseDuration,
     parseKey,
+    parseSize,
     QuotaExceededError,
+    SchemaValidationError,
+    TimeoutError,
     throttle,
     toError,
     UnsupportedEnvironmentError,
@@ -115,36 +173,16 @@ export {
 // Factory Helpers
 // ==============================
 
-import { CacheEngine } from "./cache-engine";
-import type { CacheConfig } from "./types";
-import { isSSR } from "./utils";
-
 /**
- * Create a CacheEngine instance.
- *
- * @example
- * // Browser / client component
- * const cache = createCache({ dbName: 'my-app', maxSize: 50 * 1024 * 1024 });
- *
- * @example
- * // Next.js — safe to call at module level; throws only on actual usage in SSR
- * const cache = createCache();
+ * Create a CacheEngine. Safe to call during SSR — nothing touches storage until
+ * the first operation (which throws `UnsupportedEnvironmentError` on a server
+ * with the default IndexedDB storage).
  */
 export function createCache(config?: CacheConfig): CacheEngine {
     return new CacheEngine(config);
 }
 
-/**
- * Create a CacheEngine only in browser contexts.
- * Returns `null` during SSR / server-side rendering.
- *
- * Useful in Next.js App Router where modules are evaluated on the server.
- *
- * @example
- * // app/layout.tsx (client boundary)
- * "use client";
- * const cache = createClientCache({ dbName: 'layout-cache' });
- */
+/** A CacheEngine in browser contexts, `null` during SSR. */
 export function createClientCache(config?: CacheConfig): CacheEngine | null {
     if (isSSR()) return null;
     return new CacheEngine(config);

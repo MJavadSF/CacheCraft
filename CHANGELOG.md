@@ -2,6 +2,66 @@
 
 All notable changes to CacheCraft will be documented in this file.
 
+## [1.0.0] - 2026-11-15
+
+### 🎉 First stable release
+
+See [MIGRATION.md](./MIGRATION.md#v05--v10) — data from 0.x is migrated automatically.
+
+### Fixed
+- **Namespace isolation**: the root engine counted, evicted and `clear()`ed namespaced entries;
+  namespaces sharing a prefix (`a` / `a:b`) saw and cleared each other's keys. Keys are now stored as
+  `[namespace, key]`.
+- **Invisible writes**: an engine never saw keys written by another tab/engine when sync was off
+  (index-only misses). Reads now check storage (read-through), and an entry refreshed elsewhere is no
+  longer deleted as expired.
+- **New `storeName` in an existing database** failed with `NotFoundError`; stores are now created
+  automatically.
+- **`namespace()` re-initialised shared plugins**, rebinding `PrefetchPlugin` to the child.
+- **`PersistencePlugin` leaked the plaintext of encrypted values** into localStorage and rewrote the
+  whole backup on every write.
+- **Encryption**: fixed salt for every user/database and 100k PBKDF2 iterations; every namespace
+  re-derived the key.
+- **Serialization** lost `Date`/`Map`/`Set` and threw on `BigInt`.
+- `getMany` / `getBlob` / `setBlob` skipped plugins, events, access tracking and expiry deletion.
+- `batchGet`, `invalidateByTag(s)` and `import` used one transaction per key.
+- Eviction sorted all entries on every write and stopped right under the budget (thrashing).
+- `isClient()` returned false on browsers without `CompressionStream`.
+- React: hooks on the same key went out of sync after `mutate()`; `mutate()` had no rollback;
+  `useCacheStats` re-rendered on every read; `getSharedCache()` silently ignored a different config.
+- IndexedDB reads waited for the transaction to complete; they now resolve as soon as their
+  requests succeed (see `bench/RESULTS.md`).
+
+### Added
+- Storage adapters: IndexedDB, **OPFS**, memory, localStorage/sessionStorage, custom `StorageAdapter`.
+- **Memory tier** (L1) of decoded values.
+- `getOrSet`: retries with backoff, timeouts, `AbortSignal`, `forceRefresh`, `maxStale`,
+  cross-tab single-flight (Web Locks), factory context, `schema`.
+- `peek`, `getWithMeta`, `touch`, `update` (serialised read-modify-write), `invalidateByPattern`,
+  `refresh`, `requestPersistence`.
+- Budgets: `maxEntries`, `tagQuotas`, `evictionTarget`; policies expose `rank()`.
+- Human-friendly durations and sizes (`"5m"`, `"50MB"`), `defaultTTL`, `ttlJitter`.
+- Rich serializer (default) and pluggable serializers.
+- Standard Schema validation; `schemaVersion` + `migrate`.
+- Encryption: random per-database salt, 600k iterations, `CryptoKey`, `decryptionKeys`, `rotateKey()`.
+- Quota recovery (evict and retry on `QuotaExceededError`).
+- JSON-safe export/import (`exportJSON/Blob`, `importJSON/Blob`), re-encryption across databases.
+- Lazy and eager migration of ≤0.5 data (`migrateLegacy`, `dropLegacyData`).
+- Latency percentiles, `operation` events, `on()` returns an unsubscribe function.
+- `createTypedCache<Schema>()` for compile-time key → value typing.
+- **DevTools panel** (`cache-craft-engine/devtools`) and React `useCacheDevtools()`.
+- React: `CacheProvider`, `useSuspenseCache`, `prefetchCache`, `fallbackData`, `keepPreviousData`,
+  `refreshInterval`, `revalidateOnReconnect`, `disposeSharedCaches`.
+- Vue composables, Svelte stores, TanStack Query persister/storage, `cachedFetch` with HTTP caching
+  semantics, Service Worker / Workbox handler, OpenTelemetry metrics.
+- Leader-elected auto-cleanup across tabs.
+
+### Tooling
+- Real-browser test suite (Chromium via Playwright), property-based tests, adapter contract tests,
+  coverage thresholds, publint, are-the-types-wrong, size-limit, browser benchmarks,
+  GitHub Actions CI and tag-based publishing with provenance.
+- `engines.node` ≥ 20.
+
 ## [0.5.0] - 2026-10-05
 
 ### 🛠️ Correctness & Tooling Release

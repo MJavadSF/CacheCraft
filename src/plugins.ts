@@ -1,3 +1,4 @@
+import { richSerializer } from "./serializer";
 import type {
     CacheEntry,
     CacheGetOptions,
@@ -181,11 +182,15 @@ export class TagManagerPlugin implements CachePlugin {
     name = "tag-manager";
     version = "1.0.0";
     private tagIndex: Map<string, Set<string>> = new Map();
+    private keyTags: Map<string, readonly string[]> = new Map();
 
     afterSet(key: string, _value: unknown, entry: CacheEntry): void {
         // An overwrite may carry different tags — drop the old associations first.
         this.forget(key);
-        for (const tag of entry.tags ?? []) {
+        const tags = entry.tags ?? [];
+        if (tags.length === 0) return;
+        this.keyTags.set(key, tags);
+        for (const tag of tags) {
             let keys = this.tagIndex.get(tag);
             if (!keys) {
                 keys = new Set();
@@ -205,10 +210,16 @@ export class TagManagerPlugin implements CachePlugin {
 
     afterClear(): void {
         this.tagIndex.clear();
+        this.keyTags.clear();
     }
 
     private forget(key: string): void {
-        for (const [tag, keys] of this.tagIndex) {
+        const tags = this.keyTags.get(key);
+        if (!tags) return;
+        this.keyTags.delete(key);
+        for (const tag of tags) {
+            const keys = this.tagIndex.get(tag);
+            if (!keys) continue;
             keys.delete(key);
             if (keys.size === 0) this.tagIndex.delete(tag);
         }
@@ -219,11 +230,7 @@ export class TagManagerPlugin implements CachePlugin {
     }
 
     getTagsForKey(key: string): string[] {
-        const tags: string[] = [];
-        for (const [tag, keys] of this.tagIndex) {
-            if (keys.has(key)) tags.push(tag);
-        }
-        return tags;
+        return [...(this.keyTags.get(key) ?? [])];
     }
 
     getAllTags(): string[] {
@@ -362,16 +369,24 @@ export class WarmupPlugin implements CachePlugin {
     version = "1.0.0";
     private warmupData: Map<string, { value: unknown; options?: CacheSetOptions | undefined }> =
         new Map();
+    private host: CachePluginHost | null = null;
+
+    init(host: CachePluginHost): void {
+        this.host = host;
+    }
 
     addWarmupData(key: string, value: unknown, options?: CacheSetOptions): void {
         this.warmupData.set(key, { value, options });
     }
 
-    async warmup(cache: {
+    /** Write the warm-up data (into `cache`, or the engine the plugin is attached to). */
+    async warmup(cache?: {
         set: (k: string, v: unknown, o?: CacheSetOptions) => Promise<void>;
     }): Promise<void> {
+        const target = cache ?? this.host;
+        if (!target) throw new CacheError("WarmupPlugin is not attached to a cache", "NO_HOST");
         for (const [key, data] of this.warmupData) {
-            await cache.set(key, data.value, data.options);
+            await target.set(key, data.value, data.options);
         }
     }
 }
@@ -380,58 +395,122 @@ export class WarmupPlugin implements CachePlugin {
 // Persistence Plugin (LocalStorage fallback)
 // ==============================
 
+/**
+ * Mirrors values into localStorage as a last-resort backup.
+ *
+ * • Encrypted entries and blobs are never mirrored (that would store plaintext).
+ * • Writes are batched — per microtask by default, or every `flushDelay` ms —
+ *   instead of rewriting the whole backup on every `set`.
+ * • Each namespace gets its own backup item (`<storageKey>::<namespace>`);
+ *   values use the "rich" serializer.
+ */
 export class PersistencePlugin implements CachePlugin {
     name = "persistence";
-    version = "1.0.0";
-    private storageKey: string;
+    version = "1.1.0";
+    private readonly baseKey: string;
+    private readonly flushDelay: number;
+    private namespace = "";
+    private pending: Map<string, { value: unknown } | null> = new Map();
+    private timer: ReturnType<typeof setTimeout> | null = null;
+    private microtask = false;
+    private cleared = false;
 
-    constructor(storageKey = "cachecraft-backup") {
-        this.storageKey = storageKey;
+    constructor(storageKey = "cachecraft-backup", options: { flushDelay?: number } = {}) {
+        this.baseKey = storageKey;
+        this.flushDelay = options.flushDelay ?? 0;
     }
 
-    afterSet(key: string, value: unknown): void {
-        this.update((data) => {
-            data[key] = value;
-        });
+    init(host: CachePluginHost): void {
+        this.namespace = host.namespace;
+    }
+
+    /** The localStorage item used by this plugin's namespace. */
+    get storageKey(): string {
+        return this.namespace ? `${this.baseKey}::${this.namespace}` : this.baseKey;
+    }
+
+    afterSet(key: string, value: unknown, entry: CacheEntry, options?: CacheSetOptions): void {
+        if (entry.isEncrypted || options?.encrypt || entry.kind === "blob") {
+            this.queue(key, null); // make sure no stale plaintext copy survives
+            return;
+        }
+        this.queue(key, { value });
     }
 
     afterDelete(key: string): void {
-        this.update((data) => {
-            delete data[key];
-        });
+        this.queue(key, null);
     }
 
     onEvict(keys: string[]): void {
-        this.update((data) => {
-            for (const key of keys) delete data[key];
-        });
+        for (const key of keys) this.queue(key, null);
     }
 
     afterClear(): void {
-        try {
-            localStorage.removeItem(this.storageKey);
-        } catch {
-            // LocalStorage unavailable
-        }
+        this.pending.clear();
+        this.cleared = true;
+        this.schedule();
     }
 
-    private update(mutate: (data: Record<string, unknown>) => void): void {
+    private queue(key: string, change: { value: unknown } | null): void {
+        this.pending.set(key, change);
+        this.schedule();
+    }
+
+    private schedule(): void {
+        if (this.timer !== null || this.microtask) return;
+        if (this.flushDelay <= 0) {
+            this.microtask = true;
+            queueMicrotask(() => {
+                if (this.microtask) this.flush();
+            });
+            return;
+        }
+        this.timer = setTimeout(() => this.flush(), this.flushDelay);
+        (this.timer as { unref?: () => void }).unref?.();
+    }
+
+    /** Write queued changes now. */
+    flush(): void {
+        if (this.timer !== null) clearTimeout(this.timer);
+        this.timer = null;
+        this.microtask = false;
         try {
-            const data = this.loadFromLocalStorage();
-            mutate(data);
-            localStorage.setItem(this.storageKey, JSON.stringify(data));
+            const data = this.cleared ? {} : this.loadRaw();
+            this.cleared = false;
+            for (const [key, change] of this.pending) {
+                if (change === null) delete data[key];
+                else data[key] = richSerializer.serialize(change.value);
+            }
+            this.pending.clear();
+            if (Object.keys(data).length === 0) localStorage.removeItem(this.storageKey);
+            else localStorage.setItem(this.storageKey, JSON.stringify(data));
         } catch {
             // LocalStorage full or disabled
+            this.pending.clear();
         }
     }
 
-    loadFromLocalStorage(): Record<string, unknown> {
+    private loadRaw(): Record<string, string> {
         try {
             const existing = localStorage.getItem(this.storageKey);
-            return existing ? (JSON.parse(existing) as Record<string, unknown>) : {};
+            return existing ? (JSON.parse(existing) as Record<string, string>) : {};
         } catch {
             return {};
         }
+    }
+
+    /** The backed-up values (pending changes are flushed first). */
+    loadFromLocalStorage(): Record<string, unknown> {
+        if (this.pending.size || this.cleared) this.flush();
+        const out: Record<string, unknown> = {};
+        for (const [key, text] of Object.entries(this.loadRaw())) {
+            try {
+                out[key] = typeof text === "string" ? richSerializer.deserialize(text) : text;
+            } catch {
+                /* skip corrupted entries */
+            }
+        }
+        return out;
     }
 }
 

@@ -534,14 +534,13 @@ describe("cleanup & maintenance", () => {
         const cache = makeCache();
         await cache.set("k", 1);
         // Simulate drift: another connection removed the row behind our back.
-        const raw = indexedDB.open(
-            (cache as unknown as { config: { dbName: string } }).config.dbName
-        );
+        const raw = indexedDB.open(cache.info.dbName);
         await new Promise<void>((resolve) => {
             raw.onsuccess = () => {
                 const db = raw.result;
-                const tx = db.transaction("cache", "readwrite");
-                tx.objectStore("cache").delete("k");
+                const tx = db.transaction(["cache::data", "cache::meta"], "readwrite");
+                tx.objectStore("cache::data").delete(["", "k"]);
+                tx.objectStore("cache::meta").delete(["", "k"]);
                 tx.oncomplete = () => {
                     db.close();
                     resolve();

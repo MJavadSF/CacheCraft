@@ -1,0 +1,40 @@
+[
+  {
+    "name": "core (createCache)",
+    "path": "dist/index.js",
+    "import": "{ createCache }",
+    "limit": "21 kB"
+  },
+  {
+    "name": "react",
+    "path": "dist/react.js",
+    "import": "{ useCache }",
+    "limit": "22 kB",
+    "ignore": ["react"]
+  },
+  {
+    "name": "vue",
+    "path": "dist/vue.js",
+    "import": "{ useCache }",
+    "limit": "1.5 kB",
+    "ignore": ["vue"]
+  },
+  {
+    "name": "svelte",
+    "path": "dist/svelte.js",
+    "import": "{ cacheStore }",
+    "limit": "1 kB"
+  },
+  {
+    "name": "fetch",
+    "path": "dist/fetch.js",
+    "import": "{ cachedFetch }",
+    "limit": "2.5 kB"
+  },
+  {
+    "name": "devtools",
+    "path": "dist/devtools.js",
+    "import": "{ mountDevtools }",
+    "limit": "8 kB"
+  }
+]
